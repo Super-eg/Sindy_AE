@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+
+# Markdown notes
+*.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Real data
+real_data
+
+# Training outputs
+checkpoints/
+figures/
+*.log
+
+# Large binary data files
+*.npz
+*.h5
+*.mat
+
+
