@@ -7,7 +7,7 @@ import numpy as np
 from scipy.integrate import odeint
 from scipy.special import legendre
 
-from sindyae_torch.sindy_library import library_size
+from sindyae.sindy_library import library_size
 
 
 def get_lorenz_data(n_ics, noise_strength=0, input_dim=128):

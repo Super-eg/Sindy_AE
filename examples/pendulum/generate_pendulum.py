@@ -16,7 +16,7 @@ if _REPO_ROOT not in sys.path:
 
 import numpy as np
 
-from examples.pendulum.example_pendulum import get_pendulum_data
+from example_pendulum import get_pendulum_data
 
 
 def main():

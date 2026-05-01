@@ -24,7 +24,7 @@ if _REPO_ROOT not in sys.path:
 
 import numpy as np
 
-from examples.lorenz.example_lorenz import simulate_lorenz
+from example_lorenz import simulate_lorenz
 
 
 def get_lorenz_data_delay_x(n_ics, t, delay_dim=20, delay_steps=5,
