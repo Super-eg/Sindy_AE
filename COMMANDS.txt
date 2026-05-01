@@ -1,0 +1,19 @@
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+cd examples/lorenz
+python3 generate_lorenz.py --delay_dim 10 --delay_steps 3
+
+cd ..
+python3 show_input.py --data lorenz/delay_xcoordinate_d10_3.npz --n_ics 20
+
+python3 train.py --data lorenz/delay_xcoordinate_d10_3.npz \
+--latent_dim 3 \
+--loss_weight_decoder 1.0 \
+--loss_weight_sindy_z 0.01 \
+--loss_weight_sindy_x 0.01 \
+--loss_weight_sindy_reg 1e-4 \
+--loss_weight_coord 0.01 \
+--max_epochs 5001 \
+--refinement_epochs 1201
