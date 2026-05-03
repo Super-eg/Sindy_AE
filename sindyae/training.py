@@ -48,10 +48,11 @@ def _weighted_total(losses, params, include_reg=True):
 
 
 def _iter_batches(n_samples, batch_size):
-    """Sequential non-shuffled batches, matching the original TF training loop."""
+    """Yield shuffled random batch index arrays."""
+    idxs = np.random.permutation(n_samples)
     n_batches = n_samples // batch_size
     for j in range(n_batches):
-        yield np.arange(j * batch_size, (j + 1) * batch_size)
+        yield idxs[j * batch_size:(j + 1) * batch_size]
 
 
 def _make_batch(data, idxs, device, model_order):

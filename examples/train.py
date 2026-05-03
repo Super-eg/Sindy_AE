@@ -172,6 +172,10 @@ def main():
     parser.add_argument("--scheduler_factor",   type=float, default=0.5)
     parser.add_argument("--scheduler_min_lr",   type=float, default=1e-5)
 
+    # --- Reproducibility ---
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Random seed for torch and numpy (default: 0)")
+
     args = parser.parse_args()
 
     # ---- Output directory = same folder as input data ----
@@ -183,8 +187,8 @@ def main():
     sys.stdout = _Tee(sys.stdout, log_path)
     print(f"Log: {log_path}")
 
-    torch.manual_seed(0)
-    np.random.seed(0)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
 
     # ---- Load data ----
     print(f"Loading data from {args.data} …")
@@ -241,7 +245,7 @@ def main():
         "sequential_thresholding":    True,
         "coefficient_threshold":      args.coefficient_threshold,
         "threshold_frequency":        args.threshold_frequency,
-        "coefficient_initialization": "constant",
+        "coefficient_initialization": "normal",
         "coefficient_mask":           np.ones((
             library_size(lib_n, args.poly_order, args.include_sine, True),
             latent_dim,

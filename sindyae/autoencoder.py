@@ -153,23 +153,40 @@ class SindyAutoencoder(nn.Module):
             # dz_req[i,j] = (J_enc(x_req[i]) @ dx[i])[j] depends on x_req through
             # the activation derivatives in _seq_jvp.
             # We want hess_term[i,j] = (∂ dz_req[i,j] / ∂ x_req[i,:]) · dx[i,:]
-            x_req = x.detach().requires_grad_(True)
-            _, dz_req = _seq_jvp(self.encoder, x_req, dx)
-            hess_term = torch.zeros(
-                x.shape[0], self.latent_dim, device=x.device, dtype=x.dtype
-            )
-            for j in range(self.latent_dim):
-                grad_j = torch.autograd.grad(
-                    dz_req[:, j].sum(), x_req,
-                    retain_graph=True,   # keep graph for remaining latent dims
-                    create_graph=True,   # allow backprop through hess_term
-                )[0]  # [batch, input_dim]
-                hess_term[:, j] = (grad_j * dx).sum(dim=1)  # [batch]
+            with torch.enable_grad():
+                x_req = x.detach().requires_grad_(True)
+                _, dz_req = _seq_jvp(self.encoder, x_req, dx)
+                hess_term = torch.zeros(
+                    x.shape[0], self.latent_dim, device=x.device, dtype=x.dtype
+                )
+                for j in range(self.latent_dim):
+                    grad_j = torch.autograd.grad(
+                        dz_req[:, j].sum(), x_req,
+                        retain_graph=True,
+                        create_graph=self.training,
+                    )[0]  # [batch, input_dim]
+                    hess_term[:, j] = (grad_j * dx).sum(dim=1)  # [batch]
             ddz = ddz_linear + hess_term  # [batch, latent_dim]
 
             Theta = sindy_library_torch_order2(z, dz, self.poly_order, self.include_sine)
             ddz_predict = Theta @ Xi
-            x_decode, ddx_decode = _seq_jvp(self.decoder, z, ddz_predict)
+            # Full 2nd-order decoder chain rule: ddx = J_ψ(z)·z̈ + H_ψ(z)[ż, ż].
+            # _seq_jvp gives only the first term; add the Hessian term explicitly.
+            # Mirrors the encoder Hessian above (lines ~156-169) but loops over
+            # output dims of the decoder (= input_dim) instead of latent_dim.
+            x_decode, ddx_decode_linear = _seq_jvp(self.decoder, z, ddz_predict)
+            with torch.enable_grad():
+                z_req = z.detach().requires_grad_(True)
+                _, dx_req = _seq_jvp(self.decoder, z_req, dz)
+                hess_dec = torch.zeros_like(x_decode)
+                for i in range(self.input_dim):
+                    grad_i = torch.autograd.grad(
+                        dx_req[:, i].sum(), z_req,
+                        retain_graph=(i < self.input_dim - 1),
+                        create_graph=self.training,
+                    )[0]  # [batch, latent_dim]
+                    hess_dec[:, i] = (grad_i * dz).sum(dim=1)
+            ddx_decode = ddx_decode_linear + hess_dec
             return {
                 "z": z, "x_decode": x_decode,
                 "dz": dz, "ddz": ddz,

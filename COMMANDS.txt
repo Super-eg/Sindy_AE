@@ -41,25 +41,25 @@ cd ..
 python3 show_input.py --data pendulum/pendulum_data.npz
 
 python3 train.py --data pendulum/pendulum_data.npz \
-  --latent_dim 1 \
+  --latent_dim 2 \
   --poly_order 2 \
   --include_sine \
-  --widths 64,32 \
+  --widths 128,64 \
   --activation tanh \
   --loss_weight_decoder 1.0 \
-  --loss_weight_sindy_z 0.1 \
-  --loss_weight_sindy_x 0.1 \
-  --loss_weight_sindy_reg 2e-4 \
+  --loss_weight_sindy_z 0.01 \
+  --loss_weight_sindy_x 0.01 \
+  --loss_weight_sindy_reg 1e-3 \
   --loss_weight_coord 0.0 \
-  --coefficient_threshold 0.1 \
-  --threshold_frequency 500 \
-  --max_epochs 10001 \
-  --refinement_epochs 2001 \
+  --coefficient_threshold 0.15 \
+  --threshold_frequency 1000 \
+  --max_epochs 15001 \
+  --refinement_epochs 3001 \
   --batch_size 1024 \
   --learning_rate 1e-3 \
   --patience 8 \
   --scheduler_type plateau \
   --scheduler_patience 500 \
   --scheduler_factor 0.5 \
-  --scheduler_min_lr 1e-5 \
+  --scheduler_min_lr 5e-4 \
   --print_frequency 100

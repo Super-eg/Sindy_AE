@@ -9,7 +9,7 @@ With embedding dimension d ≥ 2·dim(attractor)+1 ≈ 7, the delay vector is
 diffeomorphic to the original 3-D Lorenz attractor (Takens' theorem).
 
 Run from examples/lorenz/:
-    python3 generate_lorenz.py
+    python3 generate_delay.py
 
 Output .npz is passed to examples/train.py via --data <path>.
 """
@@ -50,6 +50,7 @@ def get_lorenz_data_delay_x(n_ics, t, delay_dim=20, delay_steps=5,
     dict with keys:
         x   : (n_ics * n_valid, delay_dim)  float32
         dx  : (n_ics * n_valid, delay_dim)  float32
+        z   : (n_ics * n_valid, 3)          float32  — true normalized Lorenz state
         t   : (n_valid,)   valid time points (first (d-1)*delay_steps dropped)
     """
     normalization = 1.0 / 40.0          # same scale as example_lorenz.py
@@ -71,6 +72,7 @@ def get_lorenz_data_delay_x(n_ics, t, delay_dim=20, delay_steps=5,
 
     x_all  = np.zeros((n_ics, n_valid, delay_dim), dtype=np.float32)
     dx_all = np.zeros_like(x_all)
+    z_all  = np.zeros((n_ics, n_valid, 3), dtype=np.float32)
 
     for i in range(n_ics):
         z, dz, _ = simulate_lorenz(ics[i], t)
@@ -83,15 +85,19 @@ def get_lorenz_data_delay_x(n_ics, t, delay_dim=20, delay_steps=5,
             x_all[i, :, k]  = z_x[s:e]
             dx_all[i, :, k] = dz_x[s:e]
 
+        # True normalized Lorenz state at valid time points
+        z_all[i] = (z[min_idx:min_idx + n_valid] * normalization).astype(np.float32)
+
     # Flatten: (n_ics, n_valid, delay_dim) → (n_ics*n_valid, delay_dim)
     x_flat  = x_all.reshape(-1, delay_dim)
     dx_flat = dx_all.reshape(-1, delay_dim)
+    z_flat  = z_all.reshape(-1, 3)
 
     if noise_strength > 0:
         x_flat  = x_flat  + (noise_strength * np.random.randn(*x_flat.shape)).astype(np.float32)
         dx_flat = dx_flat + (noise_strength * np.random.randn(*dx_flat.shape)).astype(np.float32)
 
-    return {'x': x_flat, 'dx': dx_flat, 't': t[min_idx:]}
+    return {'x': x_flat, 'dx': dx_flat, 'z': z_flat, 't': t[min_idx:]}
 
 
 def main():

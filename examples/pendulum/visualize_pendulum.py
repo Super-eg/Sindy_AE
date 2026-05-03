@@ -7,9 +7,9 @@ Generates 5 figures saved next to the .mat checkpoint:
     fig4_sindy_simulation.png  - SINDy 2nd-order ODE forward simulation vs encoder
     fig5_images.png            - Visual: true vs decoded 51×51 images at snapshots (1 IC)
 
-Usage (run from examples/):
-    python3 pendulum/visualize_pendulum.py pendulum/model_YYYYMMDD_HHMMSS --data pendulum/pendulum_data.npz
-    python3 pendulum/visualize_pendulum.py pendulum/model_YYYYMMDD_HHMMSS --data pendulum/pendulum_data.npz --ic 3
+Usage (run from examples/pendulum/):
+    python3 visualize_pendulum.py --mat model_YYYYMMDD_HHMMSS.mat --data pendulum_data.npz
+    python3 visualize_pendulum.py --mat model_YYYYMMDD_HHMMSS.mat --data pendulum_data.npz --ic 3
 """
 import os
 import sys
@@ -351,10 +351,9 @@ def fig5_images(model, test_data, device, out_dir, ic_idx, n_snapshots=8):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("prefix", help="Model checkpoint prefix "
-                        "(e.g. pendulum/model_20260501_150000)")
-    parser.add_argument("fmt", nargs="?", default="mat", choices=["mat", "json"],
-                        help="Checkpoint format (default: mat)")
+    parser.add_argument("--mat", required=True,
+                        help="Path to checkpoint .mat (or .json) file, "
+                             "e.g. model_20260501_150000.mat")
     parser.add_argument("--data", required=True,
                         help="Path to .npz data file; uses test_x/dx/ddx/z/t (falls back to val split)")
     parser.add_argument("--ic", type=int, default=0,
@@ -365,9 +364,16 @@ def main():
 
     device = torch.device("cpu")
 
-    print(f"Loading model from {args.prefix} ({args.fmt})...")
-    mat_prefix = args.prefix[:-4] if args.prefix.endswith(".mat") else args.prefix
-    if args.fmt == "mat":
+    # Strip extension to get prefix; infer format from extension
+    if args.mat.endswith(".json"):
+        mat_prefix = args.mat[:-5]
+        fmt = "json"
+    else:
+        mat_prefix = args.mat[:-4] if args.mat.endswith(".mat") else args.mat
+        fmt = "mat"
+
+    print(f"Loading model from {mat_prefix} ({fmt})...")
+    if fmt == "mat":
         model, params = load_model_mat(mat_prefix, device=device)
     else:
         model, params = load_model_json(mat_prefix, device=device)

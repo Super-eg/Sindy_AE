@@ -7,9 +7,9 @@ Generates 5 figures saved next to the .mat checkpoint:
     fig4_sindy_simulation.png - SINDy ODE forward simulation vs encoder trajectory
     fig4b_sindy_3d.png        - 3D: encoder trajectory vs SINDy propagated trajectory
 
-Usage (run from examples/):
-    python3 lorenz/visualize_lorenz.py lorenz/model_YYYYMMDD_HHMMSS --data lorenz/data.npz
-    python3 lorenz/visualize_lorenz.py lorenz/model_YYYYMMDD_HHMMSS --data lorenz/data.npz --ic 3
+Usage (run from examples/lorenz/):
+    python3 visualize_lorenz.py --mat model_YYYYMMDD_HHMMSS.mat --data legendre_full.npz
+    python3 visualize_lorenz.py --mat model_YYYYMMDD_HHMMSS.mat --data legendre_full.npz --ic 3
 """
 import os
 import sys
@@ -29,7 +29,8 @@ from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
 from scipy.integrate import solve_ivp
 
 from sindyae import load_model_mat, load_model_json
-from sindyae.sindy_library import sindy_library_torch
+from sindyae.sindy_library import sindy_library_torch, sindy_library_torch_order2
+from sindyae.autoencoder import _seq_jvp
 
 
 # ─── helpers ────────────────────────────────────────────────────────────────
@@ -55,12 +56,30 @@ def _decode(model, z_np, device, bs=4096):
 
 
 def _sindy_rhs(Xi, poly_order, include_sine):
-    """Return a scipy-compatible RHS function for the learned SINDy ODE."""
+    """Return a scipy-compatible RHS function for the learned SINDy ODE (order 1)."""
     def rhs(t, z):
         zt = torch.tensor(z, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
             Theta = sindy_library_torch(zt, poly_order, include_sine)
         return (Theta.numpy() @ Xi)[0]
+    return rhs
+
+
+def _sindy_rhs_order2(Xi, latent_dim, poly_order, include_sine):
+    """Return a scipy-compatible RHS for a 2nd-order SINDy ODE.
+
+    State vector: [z (latent_dim), dz (latent_dim)].
+    Returns [dz, ddz] where ddz = Theta(z, dz) @ Xi.
+    """
+    def rhs(t, state):
+        z  = state[:latent_dim]
+        dz = state[latent_dim:]
+        zt  = torch.tensor(z,  dtype=torch.float32).unsqueeze(0)
+        dzt = torch.tensor(dz, dtype=torch.float32).unsqueeze(0)
+        with torch.no_grad():
+            Theta = sindy_library_torch_order2(zt, dzt, poly_order, include_sine)
+        ddz = (Theta.numpy() @ Xi)[0]
+        return np.concatenate([dz, ddz])
     return rhs
 
 
@@ -114,7 +133,7 @@ def fig2_time_series(model, test_data, device, out_dir, ic_idx):
     sl      = _ic_slice(ic_idx, n_steps)
     has_z   = 'z' in test_data
     if has_z:
-        z_true = test_data['z'][ic_idx]               # [T, 3]
+        z_true = test_data['z'][sl]                   # [T, 3]
     else:
         z_true = test_data['x'][sl, :3]               # first 3 delay dims as proxy [T, 3]
     z_lat   = _encode(model, test_data['x'][sl], device)  # [T, 3]
@@ -161,11 +180,23 @@ def fig3_reconstruction(model, test_data, device, out_dir, ic_idx):
 
     x_t  = torch.tensor(x_np,  dtype=torch.float32, device=device)
     dx_t = torch.tensor(dx_np, dtype=torch.float32, device=device)
+    ddx_t = None
+    if 'ddx' in test_data:
+        ddx_t = torch.tensor(test_data['ddx'][sl], dtype=torch.float32, device=device)
 
     with torch.no_grad():
-        outputs = model(x_t, dx_t)
-    x_dec  = outputs['x_decode'].cpu().numpy()
-    dx_dec = outputs['dx_decode'].cpu().numpy()
+        outputs = model(x_t, dx_t, ddx_t)
+    x_dec = outputs['x_decode'].cpu().numpy()
+
+    order2 = model.model_order == 2
+    if order2:
+        deriv_dec = outputs['ddx_decode'].cpu().numpy()
+        deriv_np  = test_data['ddx'][sl]
+        deriv_label = 'ddx'
+    else:
+        deriv_dec = outputs['dx_decode'].cpu().numpy()
+        deriv_np  = dx_np
+        deriv_label = 'dx'
 
     n_dims = x_np.shape[1]
     dims = [0, n_dims // 2, n_dims - 1]  # 3 representative input dimensions
@@ -173,26 +204,26 @@ def fig3_reconstruction(model, test_data, device, out_dir, ic_idx):
     fig, axes = plt.subplots(3, 2, figsize=(14, 9), sharex=True)
 
     for row, d in enumerate(dims):
-        axes[row, 0].plot(t, x_np[:, d],  'steelblue', lw=1.5, label='True')
-        axes[row, 0].plot(t, x_dec[:, d], 'tomato',    lw=1.2, ls='--', label='Decoded')
+        axes[row, 0].plot(t, x_np[:, d],    'steelblue', lw=1.5, label='True')
+        axes[row, 0].plot(t, x_dec[:, d],   'tomato',    lw=1.2, ls='--', label='Decoded')
         axes[row, 0].set_ylabel(f'x[{d}]')
         axes[row, 0].legend(fontsize=8); axes[row, 0].grid(True, alpha=0.3)
 
-        axes[row, 1].plot(t, dx_np[:, d],  'steelblue', lw=1.5, label='True')
-        axes[row, 1].plot(t, dx_dec[:, d], 'tomato',    lw=1.2, ls='--', label='Decoded')
-        axes[row, 1].set_ylabel(f'dx[{d}]')
+        axes[row, 1].plot(t, deriv_np[:, d],  'steelblue', lw=1.5, label='True')
+        axes[row, 1].plot(t, deriv_dec[:, d], 'tomato',    lw=1.2, ls='--', label='Decoded')
+        axes[row, 1].set_ylabel(f'{deriv_label}[{d}]')
         axes[row, 1].legend(fontsize=8); axes[row, 1].grid(True, alpha=0.3)
 
     axes[0, 0].set_title('Input reconstruction  x', fontsize=11)
-    axes[0, 1].set_title('Derivative reconstruction  dx', fontsize=11)
+    axes[0, 1].set_title(f'Derivative reconstruction  {deriv_label}', fontsize=11)
     axes[-1, 0].set_xlabel('t'); axes[-1, 1].set_xlabel('t')
 
     # Relative MSE annotations
-    rel_x  = np.mean((x_dec  - x_np )**2) / np.mean(x_np **2)
-    rel_dx = np.mean((dx_dec - dx_np)**2) / np.mean(dx_np**2)
+    rel_x     = np.mean((x_dec     - x_np    )**2) / np.mean(x_np    **2)
+    rel_deriv = np.mean((deriv_dec - deriv_np)**2) / np.mean(deriv_np**2)
     fig.suptitle(
         f'Reconstruction Quality — IC #{ic_idx}\n'
-        f'relative err x: {rel_x:.2e}   relative err dx: {rel_dx:.2e}',
+        f'relative err x: {rel_x:.2e}   relative err {deriv_label}: {rel_deriv:.2e}',
         fontsize=12, fontweight='bold'
     )
     plt.tight_layout()
@@ -212,21 +243,31 @@ def fig4_sindy_simulation(model, params, test_data, device, out_dir, ic_idx):
     x_np    = test_data['x'][sl]
 
     # Initial latent state from encoder
-    x0 = torch.tensor(x_np[0:1], dtype=torch.float32, device=device)
+    x0  = torch.tensor(x_np[0:1],                      dtype=torch.float32, device=device)
+    dx0 = torch.tensor(test_data['dx'][sl][0:1],        dtype=torch.float32, device=device)
     with torch.no_grad():
         z0 = model.encoder(x0).cpu().numpy()[0]
 
-    Xi          = (model.coefficient_mask * model.sindy_coefficients).detach().cpu().numpy()
-    poly_order  = params['poly_order']
+    Xi           = (model.coefficient_mask * model.sindy_coefficients).detach().cpu().numpy()
+    poly_order   = params['poly_order']
     include_sine = params.get('include_sine', False)
+    order2       = model.model_order == 2
 
     # Integrate SINDy ODE
-    rhs = _sindy_rhs(Xi, poly_order, include_sine)
+    if order2:
+        _, dz0 = _seq_jvp(model.encoder, x0, dx0)
+        dz0 = dz0.detach().cpu().numpy()[0]
+        state0 = np.concatenate([z0, dz0])
+        rhs = _sindy_rhs_order2(Xi, model.latent_dim, poly_order, include_sine)
+    else:
+        state0 = z0
+        rhs = _sindy_rhs(Xi, poly_order, include_sine)
+
     try:
-        sol = solve_ivp(rhs, [t[0], t[-1]], z0, t_eval=t,
+        sol = solve_ivp(rhs, [t[0], t[-1]], state0, t_eval=t,
                         method='RK45', rtol=1e-6, atol=1e-9, max_step=0.02)
-        sim_ok   = sol.success and not np.any(np.isnan(sol.y))
-        z_sindy  = sol.y.T if sim_ok else None
+        sim_ok  = sol.success and not np.any(np.isnan(sol.y))
+        z_sindy = sol.y[:model.latent_dim, :].T if sim_ok else None
     except Exception as e:
         print(f"  Warning: SINDy integration failed ({e})")
         sim_ok, z_sindy = False, None
@@ -301,9 +342,9 @@ def fig4_sindy_simulation(model, params, test_data, device, out_dir, ic_idx):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('prefix', help='Model checkpoint prefix (e.g. lorenz/model_20260501_150000)')
-    parser.add_argument('fmt', nargs='?', default='mat', choices=['mat', 'json'],
-                        help='Checkpoint format (default: mat)')
+    parser.add_argument('--mat', required=True,
+                        help='Path to checkpoint .mat (or .json) file, '
+                             'e.g. model_20260501_150000.mat')
     parser.add_argument('--data', required=True,
                         help='Path to .npz data file; uses test_x/dx/t (falls back to val split)')
     parser.add_argument('--ic', type=int, default=0,
@@ -314,9 +355,16 @@ def main():
 
     device = torch.device('cpu')  # visualization is CPU; keeps output deterministic
 
-    print(f"Loading model from {args.prefix} ({args.fmt})...")
-    mat_prefix = args.prefix[:-4] if args.prefix.endswith('.mat') else args.prefix
-    if args.fmt == 'mat':
+    # Strip extension to get prefix; infer format from extension
+    if args.mat.endswith('.json'):
+        mat_prefix = args.mat[:-5]
+        fmt = 'json'
+    else:
+        mat_prefix = args.mat[:-4] if args.mat.endswith('.mat') else args.mat
+        fmt = 'mat'
+
+    print(f"Loading model from {mat_prefix} ({fmt})...")
+    if fmt == 'mat':
         model, params = load_model_mat(mat_prefix, device=device)
     else:
         model, params = load_model_json(mat_prefix, device=device)
@@ -330,11 +378,18 @@ def main():
     npz = np.load(args.data, allow_pickle=False)
     split = 'test' if 'test_x' in npz.files else 'val'
     print(f"  Using '{split}' split.")
+    t_key = f'{split}_t' if f'{split}_t' in npz.files else 'train_t'
     test_data = {
         'x':  npz[f'{split}_x'],
         'dx': npz[f'{split}_dx'],
-        't':  npz[f'{split}_t'],
+        't':  npz[t_key],
     }
+    ddx_key = f'{split}_ddx'
+    if ddx_key in npz.files:
+        test_data['ddx'] = npz[ddx_key]
+    z_key = f'{split}_z'
+    if z_key in npz.files:
+        test_data['z'] = npz[z_key]  # [N*T, 3] normalized true Lorenz state
     n_steps = len(test_data['t'])
     n_ics   = test_data['x'].shape[0] // n_steps
     print(f"  {n_ics} ICs × {n_steps} steps = {test_data['x'].shape[0]} samples")
