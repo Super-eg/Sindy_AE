@@ -74,7 +74,7 @@ def _save_loss_plot(validation_losses, out_path):
 
     # Determine which loss keys are present
     sample = validation_losses[0]
-    loss_keys = [k for k in ("decoder", "sindy_z", "sindy_x", "sindy_regularization", "coord")
+    loss_keys = [k for k in ("decoder", "sindy_z", "sindy_x", "sindy_regularization", "coord", "sindy_cons")
                  if k in sample]
 
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -86,6 +86,7 @@ def _save_loss_plot(validation_losses, out_path):
         "sindy_x":              "#d62728",
         "sindy_regularization": "#9467bd",
         "coord":                "#8c564b",
+        "sindy_cons":           "#e377c2",
     }
     labels = {
         "total":                "total",
@@ -94,6 +95,7 @@ def _save_loss_plot(validation_losses, out_path):
         "sindy_x":              "sindy_x",
         "sindy_regularization": "reg",
         "coord":                "coord",
+        "sindy_cons":           "cons",
     }
 
     ax.semilogy(epochs, [d["total"] for d in validation_losses],
@@ -149,6 +151,11 @@ def main():
                         help="L1 regularization weight on SINDy coefficients (default: 1e-4)")
     parser.add_argument("--loss_weight_coord",     type=float, default=0.0,
                         help="Weight for coord loss z[:,0] ≈ x[:,0]; useful for delay embedding "
+                             "(default: 0.0 = disabled)")
+    parser.add_argument("--loss_weight_cons",      type=float, default=0.0,
+                        help="Weight for SINDy consistency loss (Bakarji et al. 2023, eq 1.11): "
+                             "integrate latent dynamics and verify z[:,0] reproduces delay entries. "
+                             "Only active when .npz contains tau (delay embedding data). "
                              "(default: 0.0 = disabled)")
 
     # --- Thresholding ---
@@ -257,6 +264,7 @@ def main():
         "loss_weight_sindy_x":              args.loss_weight_sindy_x,
         "loss_weight_sindy_regularization": args.loss_weight_sindy_reg,
         "loss_weight_coord":                args.loss_weight_coord,
+        "loss_weight_sindy_cons":           args.loss_weight_cons,
 
         # LR scheduler
         "scheduler_type":    None if args.scheduler_type == "none" else args.scheduler_type,
@@ -297,6 +305,8 @@ def main():
     )
     coord_str = (f"{args.loss_weight_coord:.0e}"
                  if args.loss_weight_coord > 0 else "disabled")
+    cons_str  = (f"{args.loss_weight_cons:.0e}"
+                 if args.loss_weight_cons > 0 else "disabled")
 
     print("=" * 60)
     print("HYPERPARAMETERS")
@@ -311,7 +321,8 @@ def main():
           f"sindy_z={args.loss_weight_sindy_z},  "
           f"sindy_x={args.loss_weight_sindy_x},  "
           f"reg={args.loss_weight_sindy_reg:.0e},  "
-          f"coord={coord_str}")
+          f"coord={coord_str},  "
+          f"cons={cons_str}")
     print(f"  Thresholding  : freq={args.threshold_frequency} ep,  "
           f"threshold={args.coefficient_threshold}")
     print(f"  LR scheduler  : {sched_str}")

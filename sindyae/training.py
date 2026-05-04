@@ -4,9 +4,52 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from .sindy_library import sindy_library_torch
+
 
 def _to_tensor(arr, device, dtype=torch.float32):
     return torch.as_tensor(arr, dtype=dtype, device=device)
+
+
+def _rk4_step(z, f, dt):
+    """Single RK4 integration step: z_{n+1} = RK4(z_n, f, dt)."""
+    k1 = f(z)
+    k2 = f(z + 0.5 * dt * k1)
+    k3 = f(z + 0.5 * dt * k2)
+    k4 = f(z + dt * k3)
+    return z + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+
+def _sindy_cons_loss(model, z0, x, params):
+    """SINDy consistency loss (eq 1.11, Bakarji et al. 2023).
+
+    Integrates the latent SINDy dynamics from z0 = encoder(x) and
+    checks that z[:,0] reproduces each element of the delay embedding x.
+
+    Our delay convention is backward: x[k] = y(t - k*tau), so we
+    integrate with dt = -tau to step backward in time.
+    """
+    delay_dim = x.shape[1]
+    if delay_dim < 2:
+        return torch.zeros([], device=x.device, dtype=x.dtype)
+
+    tau = params.get("tau")
+    if tau is None:
+        tau = params.get("dt", 1.0) * params.get("delay_steps", 1)
+    dt = -float(tau)  # negative: x[k] = y(t - k*tau)
+
+    Xi = model._masked_coefficients()
+
+    def sindy_rhs(z):
+        return sindy_library_torch(z, model.poly_order, model.include_sine) @ Xi
+
+    loss = torch.zeros([], device=x.device, dtype=x.dtype)
+    z = z0
+    for j in range(1, delay_dim):
+        z = _rk4_step(z, sindy_rhs, dt)
+        loss = loss + F.mse_loss(z[:, 0], x[:, j])
+
+    return loss / (delay_dim - 1)
 
 
 def compute_losses(outputs, batch, model, params):
@@ -27,9 +70,14 @@ def compute_losses(outputs, batch, model, params):
     masked = model.coefficient_mask * model.sindy_coefficients
     losses["sindy_regularization"] = masked.abs().mean()
 
-    # 5th loss: first latent variable ≈ first input element (useful for delay embedding)
+    # coord loss: first latent variable ≈ first input element (useful for delay embedding)
     if params.get("loss_weight_coord", 0.0) > 0:
         losses["coord"] = F.mse_loss(outputs["z"][:, 0], x[:, 0])
+
+    # SINDy consistency loss (Bakarji et al. 2023, eq 1.11):
+    # integrate latent SINDy dynamics and verify z[:,0] reproduces delay entries
+    if params.get("loss_weight_sindy_cons", 0.0) > 0 and params.get("tau") is not None:
+        losses["sindy_cons"] = _sindy_cons_loss(model, outputs["z"], x, params)
 
     return losses
 
@@ -44,6 +92,8 @@ def _weighted_total(losses, params, include_reg=True):
         total = total + params["loss_weight_sindy_regularization"] * losses["sindy_regularization"]
     if "coord" in losses:
         total = total + params.get("loss_weight_coord", 0.0) * losses["coord"]
+    if "sindy_cons" in losses:
+        total = total + params.get("loss_weight_sindy_cons", 0.0) * losses["sindy_cons"]
     return total
 
 
@@ -200,12 +250,14 @@ def train_network(training_data, validation_data, params, model=None, device=Non
 
             coord_str = (f"  coord={val_losses['coord']:.3e}"
                          if "coord" in val_losses else "")
+            cons_str = (f"  cons={val_losses['sindy_cons']:.3e}"
+                        if "sindy_cons" in val_losses else "")
             if print_progress:
                 print(
                     f"[main {epoch:5d}] total={val_total:.3e}  "
                     f"dec={val_losses['decoder']:.3e}  sindy_z={val_losses['sindy_z']:.3e}  "
                     f"sindy_x={val_losses['sindy_x']:.3e}  reg={val_losses['sindy_regularization']:.3e}"
-                    f"{coord_str}  lr={current_lr:.2e}  ({elapsed:.1f}s)"
+                    f"{coord_str}{cons_str}  lr={current_lr:.2e}  ({elapsed:.1f}s)"
                 )
 
             # Detect LR drop → reset early-stop counter so the model gets a
@@ -266,11 +318,13 @@ def train_network(training_data, validation_data, params, model=None, device=Non
                 elapsed = time.time() - t0
                 coord_str = (f"  coord={val_losses['coord']:.3e}"
                              if "coord" in val_losses else "")
+                cons_str = (f"  cons={val_losses['sindy_cons']:.3e}"
+                            if "sindy_cons" in val_losses else "")
                 if print_progress:
                     print(
                         f"[refine {epoch:5d}] total={val_total:.3e}  "
                         f"dec={val_losses['decoder']:.3e}  sindy_z={val_losses['sindy_z']:.3e}  "
-                        f"sindy_x={val_losses['sindy_x']:.3e}{coord_str}  lr={refine_lr:.2e}  ({elapsed:.1f}s)"
+                        f"sindy_x={val_losses['sindy_x']:.3e}{coord_str}{cons_str}  lr={refine_lr:.2e}  ({elapsed:.1f}s)"
                     )
                 if patience > 0:
                     if val_total < best_loss - min_delta:
