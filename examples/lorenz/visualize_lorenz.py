@@ -1,15 +1,17 @@
 """Visualize trained Lorenz model: learned latent dynamics vs true Lorenz.
 
-Generates 5 figures saved next to the .mat checkpoint:
+Generates 6 figures saved next to the .mat checkpoint:
     fig1_3d_attractor.png     - 3D attractor: true z vs learned latent ξ (all test ICs)
     fig2_time_series.png      - Time series: true z₀z₁z₂ vs latent ξ₀ξ₁ξ₂ (1 IC)
     fig3_reconstruction.png   - Input x and dx reconstruction quality (1 IC)
     fig4_sindy_simulation.png - SINDy ODE forward simulation vs encoder trajectory
     fig4b_sindy_3d.png        - 3D: encoder trajectory vs SINDy propagated trajectory
+    fig5_multi_ic_attractor.png - Multi-IC 3D: encoder vs SINDy attractor coverage
 
 Usage (run from examples/lorenz/):
     python3 visualize_lorenz.py --mat model_YYYYMMDD_HHMMSS.mat --data legendre_full.npz
     python3 visualize_lorenz.py --mat model_YYYYMMDD_HHMMSS.mat --data legendre_full.npz --ic 3
+    python3 visualize_lorenz.py --mat model_YYYYMMDD_HHMMSS.mat --data legendre_full.npz --n_ics_plot 20
 """
 import os
 import sys
@@ -338,6 +340,92 @@ def fig4_sindy_simulation(model, params, test_data, device, out_dir, ic_idx):
         print(f"  Saved: {path3d}")
 
 
+# ─── figure 5: multi-IC attractor coverage ────────────────────────────────────
+
+def fig5_multi_ic_attractor(model, params, test_data, device, out_dir, n_ics_plot=10):
+    """Multi-IC 3D attractor: encoder trajectories vs SINDy ODE (side-by-side).
+
+    Left panel : trajectories produced by the encoder on real data.
+    Right panel: trajectories produced by integrating the learned SINDy ODE
+                 from the same initial latent states.
+    Each IC gets a distinct colour; diverged SINDy runs are marked with ×.
+    """
+    t = test_data['t']
+    n_steps = len(t)
+    n_ics_total = test_data['x'].shape[0] // n_steps
+    n_show = min(n_ics_plot, n_ics_total)
+
+    # Evenly spaced IC indices across the test set
+    ic_indices = np.linspace(0, n_ics_total - 1, n_show, dtype=int)
+
+    Xi          = (model.coefficient_mask * model.sindy_coefficients).detach().cpu().numpy()
+    poly_order  = params['poly_order']
+    include_sine = params.get('include_sine', False)
+    order2      = model.model_order == 2
+
+    # Cycle through tab10; works for ≤10 ICs and wraps gracefully for more
+    colors = plt.cm.tab10(np.arange(n_show) % 10)
+
+    fig = plt.figure(figsize=(14, 6))
+    ax_enc = fig.add_subplot(121, projection='3d')
+    ax_sin = fig.add_subplot(122, projection='3d')
+
+    n_converged = 0
+    for ci, ic_idx in enumerate(ic_indices):
+        sl   = _ic_slice(ic_idx, n_steps)
+        x_np = test_data['x'][sl]
+        c    = colors[ci]
+
+        # ── encoder trajectory ──
+        z_enc = _encode(model, x_np, device)
+        ax_enc.plot(z_enc[:, 0], z_enc[:, 1], z_enc[:, 2],
+                    color=c, lw=0.7, alpha=0.75)
+        ax_enc.scatter(*z_enc[0], color=c, s=25, zorder=5)
+
+        # ── SINDy ODE trajectory ──
+        x0_t  = torch.tensor(x_np[0:1], dtype=torch.float32, device=device)
+        dx0_t = torch.tensor(test_data['dx'][sl][0:1], dtype=torch.float32, device=device)
+        with torch.no_grad():
+            z0_np = model.encoder(x0_t).cpu().numpy()[0]
+
+        if order2:
+            _, dz0_t = _seq_jvp(model.encoder, x0_t, dx0_t)
+            state0 = np.concatenate([z0_np, dz0_t.detach().cpu().numpy()[0]])
+            rhs = _sindy_rhs_order2(Xi, model.latent_dim, poly_order, include_sine)
+        else:
+            state0 = z0_np
+            rhs    = _sindy_rhs(Xi, poly_order, include_sine)
+
+        try:
+            sol = solve_ivp(rhs, [t[0], t[-1]], state0, t_eval=t,
+                            method='RK45', rtol=1e-6, atol=1e-9, max_step=0.02)
+            if sol.success and not np.any(np.isnan(sol.y)):
+                z_sin = sol.y[:model.latent_dim, :].T
+                ax_sin.plot(z_sin[:, 0], z_sin[:, 1], z_sin[:, 2],
+                            color=c, lw=0.7, alpha=0.75)
+                ax_sin.scatter(*z0_np, color=c, s=25, zorder=5)
+                n_converged += 1
+            else:
+                ax_sin.scatter(*z0_np, color=c, s=60, marker='x', zorder=5)
+        except Exception:
+            ax_sin.scatter(*z0_np, color=c, s=60, marker='x', zorder=5)
+
+    ax_enc.set_title(f'Encoder trajectories ({n_show} ICs)', fontsize=11)
+    ax_enc.set_xlabel('ξ₀'); ax_enc.set_ylabel('ξ₁'); ax_enc.set_zlabel('ξ₂')
+
+    ax_sin.set_title(f'SINDy ODE trajectories\n({n_converged}/{n_show} converged)',
+                     fontsize=11)
+    ax_sin.set_xlabel('ξ₀'); ax_sin.set_ylabel('ξ₁'); ax_sin.set_zlabel('ξ₂')
+
+    fig.suptitle('Multi-IC Attractor — Encoder vs Learned SINDy Dynamics',
+                 fontsize=13, fontweight='bold')
+    plt.tight_layout()
+    path = os.path.join(out_dir, 'fig5_multi_ic_attractor.png')
+    plt.savefig(path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  Saved: {path}  ({n_converged}/{n_show} SINDy ICs converged)")
+
+
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -351,6 +439,8 @@ def main():
                         help='Which test IC to use for time-series / reconstruction plots (default: 0)')
     parser.add_argument('--out_dir', default=None,
                         help='Output directory for figures (default: same directory as .mat file)')
+    parser.add_argument('--n_ics_plot', type=int, default=10,
+                        help='Number of ICs to show in fig5 multi-IC attractor (default: 10)')
     args = parser.parse_args()
 
     device = torch.device('cpu')  # visualization is CPU; keeps output deterministic
@@ -402,6 +492,7 @@ def main():
     fig2_time_series(model, test_data, device, out_dir, ic)
     fig3_reconstruction(model, test_data, device, out_dir, ic)
     fig4_sindy_simulation(model, params, test_data, device, out_dir, ic)
+    fig5_multi_ic_attractor(model, params, test_data, device, out_dir, n_ics_plot=args.n_ics_plot)
 
     print(f"\nDone. All figures saved to {out_dir}/")
 
