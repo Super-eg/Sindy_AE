@@ -47,6 +47,8 @@ def _sindy_cons_loss(model, z0, x, params):
     z = z0
     for j in range(1, delay_dim):
         z = _rk4_step(z, sindy_rhs, dt)
+        if not torch.isfinite(z).all():
+            return torch.zeros([], device=x.device, dtype=x.dtype)
         loss = loss + F.mse_loss(z[:, 0], x[:, j])
 
     return loss / (delay_dim - 1)
@@ -231,6 +233,7 @@ def train_network(training_data, validation_data, params, model=None, device=Non
             losses = compute_losses(outputs, batch, model, params)
             total = _weighted_total(losses, params, include_reg=True)
             total.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
             optimizer.step()
 
         # CosineAnnealingLR steps every epoch (not tied to validation)
@@ -310,6 +313,7 @@ def train_network(training_data, validation_data, params, model=None, device=Non
                 losses = compute_losses(outputs, batch, model, params)
                 total = _weighted_total(losses, params, include_reg=False)
                 total.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
                 refine_optimizer.step()
 
             if epoch % print_frequency == 0:

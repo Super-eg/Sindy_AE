@@ -15,14 +15,15 @@ python3 train.py --data lorenz/delay_xcoordinate_d10_3.npz \
   --widths 64,32 \
   --activation tanh \
   --loss_weight_decoder 1.0 \
-  --loss_weight_sindy_z 0.1 \
-  --loss_weight_sindy_x 0.1 \
-  --loss_weight_sindy_reg 3e-4 \
-  --loss_weight_coord 0.01 \
+  --loss_weight_sindy_x 1e-4 \
+  --loss_weight_sindy_z 1e-3 \
+  --loss_weight_coord 0.2 \
+  --loss_weight_cons 0.04 \
+  --loss_weight_sindy_reg 1e-3 \
   --coefficient_threshold 0.15 \
   --threshold_frequency 500 \
-  --max_epochs 8001 \
-  --refinement_epochs 2001 \
+  --max_epochs 2001 \
+  --refinement_epochs 201 \
   --batch_size 1024 \
   --learning_rate 1e-3 \
   --patience 8 \
@@ -62,4 +63,30 @@ python3 train.py --data pendulum/pendulum_data.npz \
   --scheduler_patience 500 \
   --scheduler_factor 0.5 \
   --scheduler_min_lr 5e-4 \
+  --print_frequency 100
+
+
+## Van der pol
+python3 train.py --data vander/delay_xcoordinate_d10_3.npz \
+  --latent_dim 2 \
+  --poly_order 3 \
+  --widths 64,32 \
+  --activation tanh \
+  --loss_weight_decoder 1.0 \
+  --loss_weight_sindy_x 1e-4 \
+  --loss_weight_sindy_z 1e-3 \
+  --loss_weight_coord 0.2 \
+  --loss_weight_cons 0.02 \
+  --loss_weight_sindy_reg 1e-3 \
+  --coefficient_threshold 0.15 \
+  --threshold_frequency 500 \
+  --max_epochs 2001 \
+  --refinement_epochs 201 \
+  --batch_size 1024 \
+  --learning_rate 1e-3 \
+  --patience 8 \
+  --scheduler_type plateau \
+  --scheduler_patience 500 \
+  --scheduler_factor 0.5 \
+  --scheduler_min_lr 1e-5 \
   --print_frequency 100

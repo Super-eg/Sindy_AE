@@ -99,7 +99,7 @@ class SindyAutoencoder(nn.Module):
         elif init == "constant":
             nn.init.ones_(coeffs)
         elif init == "normal":
-            nn.init.normal_(coeffs)
+            nn.init.normal_(coeffs, std=0.1)
         elif init == "specified":
             coeffs = torch.as_tensor(params["init_coefficients"], dtype=torch.float32).clone()
         else:
@@ -182,7 +182,7 @@ class SindyAutoencoder(nn.Module):
                 for i in range(self.input_dim):
                     grad_i = torch.autograd.grad(
                         dx_req[:, i].sum(), z_req,
-                        retain_graph=(i < self.input_dim - 1),
+                        retain_graph=True,  # must retain: grad_i's create_graph refs these saved tensors
                         create_graph=self.training,
                     )[0]  # [batch, latent_dim]
                     hess_dec[:, i] = (grad_i * dz).sum(dim=1)
