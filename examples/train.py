@@ -65,19 +65,9 @@ def _load_meta(npz):
 
 
 def _save_loss_plot(validation_losses, out_path):
-    """Save a semilogy plot of each loss component and total loss over epochs."""
+    """Save two semilogy plots: one for main training, one for refinement."""
     if not validation_losses:
         return
-
-    epochs = [d["epoch"] for d in validation_losses]
-    phases = [d.get("phase", "main") for d in validation_losses]
-
-    # Determine which loss keys are present
-    sample = validation_losses[0]
-    loss_keys = [k for k in ("decoder", "sindy_z", "sindy_x", "sindy_regularization", "coord", "sindy_cons")
-                 if k in sample]
-
-    fig, ax = plt.subplots(figsize=(10, 5))
 
     colors = {
         "total":                "#1f77b4",
@@ -98,27 +88,37 @@ def _save_loss_plot(validation_losses, out_path):
         "sindy_cons":           "cons",
     }
 
-    ax.semilogy(epochs, [d["total"] for d in validation_losses],
-                color=colors["total"], lw=2, label="total")
-    for key in loss_keys:
-        vals = [d.get(key, float("nan")) for d in validation_losses]
-        ax.semilogy(epochs, vals, lw=1.2, linestyle="--",
-                    color=colors.get(key, "gray"), label=labels.get(key, key))
+    def _plot_phase(records, title, path):
+        if not records:
+            return
+        epochs    = [d["epoch"] for d in records]
+        loss_keys = [k for k in ("decoder", "sindy_z", "sindy_x", "sindy_regularization",
+                                 "coord", "sindy_cons")
+                     if k in records[0]]
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.semilogy(epochs, [d["total"] for d in records],
+                    color=colors["total"], lw=2, label="total")
+        for key in loss_keys:
+            vals = [d.get(key, float("nan")) for d in records]
+            ax.semilogy(epochs, vals, lw=1.2, linestyle="--",
+                        color=colors.get(key, "gray"), label=labels.get(key, key))
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss (log scale)")
+        ax.set_title(title)
+        ax.legend(fontsize=8, ncol=2)
+        ax.grid(True, which="both", alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(path, dpi=150)
+        plt.close(fig)
+        print(f"Saved loss plot: {path}")
 
-    # Shade refinement region if present
-    refine_start = next((d["epoch"] for d in validation_losses if d.get("phase") == "refine"), None)
-    if refine_start is not None:
-        ax.axvline(refine_start, color="gray", linestyle=":", lw=1.0, label="refinement start")
+    main_records   = [d for d in validation_losses if d.get("phase", "main") == "main"]
+    refine_records = [d for d in validation_losses if d.get("phase") == "refine"]
 
-    ax.set_xlabel("Epoch (validation eval)")
-    ax.set_ylabel("Loss (log scale)")
-    ax.set_title("Validation losses over training")
-    ax.legend(fontsize=8, ncol=2)
-    ax.grid(True, which="both", alpha=0.3)
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"Saved loss plot: {out_path}")
+    # Derive sibling paths: loss0506_1200.png → loss0506_1200_main.png / _refine.png
+    base, ext = os.path.splitext(out_path)
+    _plot_phase(main_records,   "Validation losses — main training", f"{base}_main{ext}")
+    _plot_phase(refine_records, "Validation losses — refinement",    f"{base}_refine{ext}")
 
 
 def main():
