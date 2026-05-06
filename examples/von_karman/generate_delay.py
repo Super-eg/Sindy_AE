@@ -255,7 +255,6 @@ def main():
     save_dict = {f"train_{k}": v for k, v in train.items()}
     save_dict.update({f"val_{k}": v for k, v in val.items()})
     save_dict.update({f"test_{k}": v for k, v in test.items()})
-    save_dict["normalization"]  = normalization.astype(np.float32)
     save_dict["t_start"]        = np.float64(args.t_start)
     save_dict["t_end"]          = np.float64(args.t_end)
     save_dict["dt"]             = np.float64(args.dt)
