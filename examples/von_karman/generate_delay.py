@@ -69,8 +69,58 @@ def _sample_ics_noack(n_ics, mu, alpha, rng):
     return ics
 
 
+def _biot_savart_obs(z_traj, t, omega,
+                     x_probe=10.0, y_probe=0.0,
+                     x_shed=0.60, u_x=1.5, cy_half=0.65,
+                     gamma=1.0, delta2=0.09, x_max=13.5):
+    """Transverse velocity at (x_probe, y_probe) from the Kármán vortex street.
+
+    Phase θ(t) = atan2(z₁, z₀) increases at rate ω for both Hopf and Noack.
+    Each upward crossing of k·π sheds a vortex:
+        k even  → upper (CCW, sign=+1, cy=+cy_half)
+        k odd   → lower (CW,  sign=−1, cy=−cy_half)
+    Vortices advect at u_x; Biot-Savart gives vy at the probe.
+    """
+    phase = np.unwrap(np.arctan2(z_traj[:, 1], z_traj[:, 0]))
+    dt = float(t[1] - t[0])
+
+    births, cys, signs = [], [], []
+    for i in range(1, len(t)):
+        if phase[i] <= phase[i - 1]:
+            continue
+        k_lo = int(np.floor(phase[i - 1] / np.pi))
+        k_hi = int(np.floor(phase[i]     / np.pi))
+        for k in range(k_lo + 1, k_hi + 1):
+            frac = (k * np.pi - phase[i - 1]) / (phase[i] - phase[i - 1])
+            births.append(t[i - 1] + frac * dt)
+            sign = 1 if k % 2 == 0 else -1
+            signs.append(sign)
+            cys.append(cy_half * sign)
+
+    if not births:
+        return np.zeros(len(t))
+
+    t_shed = np.array(births, dtype=np.float64)
+    sign_a = np.array(signs,  dtype=np.float64)
+    cy_a   = np.array(cys,    dtype=np.float64)
+
+    # Vectorised Biot-Savart: tau[i,j] = t[i] - t_shed[j]
+    tau    = t[:, None] - t_shed[None, :]       # (n_steps, n_vortices)
+    cx     = x_shed + u_x * tau
+    active = (tau >= 0) & (cx <= x_max)
+
+    dx      = x_probe - cx
+    dy      = y_probe - cy_a[None, :]
+    r2      = dx ** 2 + dy ** 2 + delta2
+    contrib = -sign_a[None, :] * (gamma / (2 * np.pi)) * dx / r2
+    contrib[~active] = 0.0
+
+    return contrib.sum(axis=1)                  # (n_steps,)
+
+
 def get_data_delay(model, n_ics, t, delay_dim, delay_steps, normalization,
-                   noise_strength, rng, mu, omega, lam=10.0, alpha=1.0):
+                   noise_strength, rng, mu, omega, lam=10.0, alpha=1.0,
+                   x_probe=None, y_probe=0.0, obs_norm=1.0):
     """Generate delay-embedded Von Kármán data from the y-coordinate only.
 
     For each IC and each valid time step t_j, the input vector is:
@@ -117,8 +167,14 @@ def get_data_delay(model, n_ics, t, delay_dim, delay_steps, normalization,
         z_norm  = z_phys  * normalization        # broadcasts (n_steps, d) * (d,)
         dz_norm = dz_phys * normalization
 
-        y      = z_norm[:, 0]       # observe first coordinate
-        y_dot  = dz_norm[:, 0]
+        if x_probe is not None:
+            y_raw = _biot_savart_obs(z_phys, t, omega,
+                                     x_probe=x_probe, y_probe=y_probe)
+            y     = (y_raw / obs_norm).astype(np.float32)
+            y_dot = np.gradient(y, t[1] - t[0]).astype(np.float32)
+        else:
+            y     = z_norm[:, 0]    # observe first coordinate
+            y_dot = dz_norm[:, 0]
 
         for k in range(delay_dim):
             s = min_idx - k * delay_steps
@@ -167,6 +223,11 @@ def main():
                         help="Noack shift-mode time scale (default: 10.0)")
     parser.add_argument("--alpha",          type=float, default=1.0,
                         help="Noack nonlinear coupling (default: 1.0)")
+    parser.add_argument("--x_probe",  type=float, default=10.0,
+                        help="Probe x-coordinate for Biot-Savart observation "
+                             "(default: 10.0; set to -1 to use z₀ directly)")
+    parser.add_argument("--y_probe",  type=float, default=0.0,
+                        help="Probe y-coordinate (default: 0.0, centre-line)")
     parser.add_argument("--out",            default=None,
                         help="Output .npz file path "
                              "(default: delay_xcoordinate_<model>_d<dim>_<steps>.npz)")
@@ -177,8 +238,27 @@ def main():
     if args.omega is None:
         args.omega = 2 * np.pi if args.model == "hopf" else 1.0
 
+    use_biot = args.x_probe >= 0
+    obs_norm = 1.0
+    if use_biot:
+        # Calibrate: run one limit-cycle trajectory and measure peak |vy|
+        t_cal = np.arange(args.t_start, args.t_end, args.dt)
+        if args.model == "hopf":
+            z0_cal = np.array([float(np.sqrt(args.mu)), 0.0])
+            z_cal, _ = simulate_hopf(z0_cal, t_cal, mu=args.mu, omega=args.omega)
+        else:
+            r_lc_cal = float(np.sqrt(args.mu / args.alpha))
+            z0_cal = np.array([r_lc_cal, 0.0, 0.0])
+            z_cal, _ = simulate_noack(z0_cal, t_cal, mu=args.mu, omega=args.omega,
+                                      lam=args.lam, alpha=args.alpha)
+        y_cal    = _biot_savart_obs(z_cal, t_cal, args.omega,
+                                    x_probe=args.x_probe, y_probe=args.y_probe)
+        obs_norm = max(float(np.max(np.abs(y_cal[len(t_cal) // 2:]))), 1e-6)
+
+    probe_tag = f"_x{args.x_probe:.0f}" if use_biot else ""
     if args.out is None:
-        args.out = f"delay_xcoordinate_{args.model}_d{args.delay_dim}_{args.delay_steps}.npz"
+        args.out = (f"delay_xcoordinate_{args.model}"
+                    f"_d{args.delay_dim}_{args.delay_steps}{probe_tag}.npz")
 
     if args.model == "hopf":
         norm_scalar = 1.0 / float(np.sqrt(args.mu))
@@ -209,6 +289,11 @@ def main():
     print(f"  Limit-cycle r   : {r_lc:.4f}")
     print(f"  State dim       : {state_dim}")
     print(f"  Normalization   : {normalization}")
+    if use_biot:
+        print(f"  Probe (x, y)    : ({args.x_probe}, {args.y_probe})  [Biot-Savart]")
+        print(f"  Obs. norm       : {obs_norm:.4f}  (limit-cycle peak vy)")
+    else:
+        print(f"  Observation     : z₀  (first oscillator coordinate)")
     print(f"  Embedding dim   : {args.delay_dim}  (d)")
     print(f"  Delay step      : {args.delay_steps} steps  (τ = {tau:.3f} s)")
     print(f"  Time range      : {args.t_start} → {args.t_end}  (dt={args.dt})")
@@ -225,12 +310,15 @@ def main():
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
+    _probe_kw = dict(x_probe=args.x_probe if use_biot else None,
+                     y_probe=args.y_probe, obs_norm=obs_norm)
+
     print(f"Generating training data ({args.n_train_ics} ICs) …")
     train = get_data_delay(
         args.model, args.n_train_ics, t,
         args.delay_dim, args.delay_steps, normalization,
         args.noise_strength, rng, args.mu, args.omega,
-        lam=args.lam, alpha=args.alpha,
+        lam=args.lam, alpha=args.alpha, **_probe_kw,
     )
     print(f"  → train_x shape: {train['x'].shape}")
 
@@ -239,7 +327,7 @@ def main():
         args.model, args.n_val_ics, t,
         args.delay_dim, args.delay_steps, normalization,
         args.noise_strength, rng, args.mu, args.omega,
-        lam=args.lam, alpha=args.alpha,
+        lam=args.lam, alpha=args.alpha, **_probe_kw,
     )
     print(f"  → val_x shape: {val['x'].shape}")
 
@@ -248,7 +336,7 @@ def main():
         args.model, args.n_test_ics, t,
         args.delay_dim, args.delay_steps, normalization,
         args.noise_strength, rng, args.mu, args.omega,
-        lam=args.lam, alpha=args.alpha,
+        lam=args.lam, alpha=args.alpha, **_probe_kw,
     )
     print(f"  → test_x shape: {test['x'].shape}")
 
@@ -268,6 +356,10 @@ def main():
     save_dict["mu"]             = np.float64(args.mu)
     save_dict["omega"]          = np.float64(args.omega)
     save_dict["model"]          = np.array(args.model)
+    if use_biot:
+        save_dict["x_probe"]   = np.float64(args.x_probe)
+        save_dict["y_probe"]   = np.float64(args.y_probe)
+        save_dict["obs_norm"]  = np.float64(obs_norm)
     if args.model == "noack":
         save_dict["lam"]   = np.float64(args.lam)
         save_dict["alpha"] = np.float64(args.alpha)
