@@ -58,7 +58,8 @@ def _load_meta(npz):
     """Read scalar metadata fields from npz."""
     meta = {}
     for k in ("t_end", "dt", "noise_strength", "n_train_ics", "n_val_ics", "n_test_ics",
-              "delay_dim", "delay_steps", "tau", "t_start"):
+              "delay_dim", "delay_steps", "tau", "t_start",
+              "t_train_offset", "t_val_offset", "t_test_offset"):
         if k in npz.files:
             meta[k] = npz[k].item()
     return meta
@@ -187,8 +188,7 @@ def main():
 
     # ---- Output directory = same folder as input data ----
     out_dir = os.path.dirname(os.path.abspath(args.data))
-    stamp   = datetime.datetime.now().strftime("%m%d_%H%M")
-    stamp_long = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    stamp   = datetime.datetime.now().strftime("%m%d_%H%M%S")
 
     log_path = os.path.join(out_dir, f"output{stamp}.log")
     sys.stdout = _Tee(sys.stdout, log_path)
@@ -212,8 +212,18 @@ def main():
     print()
     print("=" * 60)
     print("DATA SUMMARY")
-    print(f"  train samples : {training_data['x'].shape[0]:,}  (shape: {training_data['x'].shape})")
-    print(f"  val   samples : {validation_data['x'].shape[0]:,}  (shape: {validation_data['x'].shape})")
+    if "t_train_offset" in meta:
+        _tt = training_data.get("t")
+        _vt = validation_data.get("t")
+        _ot = meta["t_train_offset"]
+        _ov = meta.get("t_val_offset", _ot)
+        _ts = (f"  {_ot + float(_tt[0]):.1f} s ~ {_ot + float(_tt[-1]):.1f} s" if _tt is not None else "")
+        _vs = (f"  {_ov + float(_vt[0]):.1f} s ~ {_ov + float(_vt[-1]):.1f} s" if _vt is not None else "")
+        print(f"  train         :{_ts}  ({training_data['x'].shape[0]:,} samples, shape={training_data['x'].shape})")
+        print(f"  val           :{_vs}  ({validation_data['x'].shape[0]:,} samples, shape={validation_data['x'].shape})")
+    else:
+        print(f"  train samples : {training_data['x'].shape[0]:,}  (shape: {training_data['x'].shape})")
+        print(f"  val   samples : {validation_data['x'].shape[0]:,}  (shape: {validation_data['x'].shape})")
     print(f"  input_dim     : {training_data['x'].shape[1]}")
     print(f"  model_order   : {model_order}  (auto-detected from {'train_ddx' if model_order == 2 else 'no ddx'})")
     if "dt" in meta and "t_end" in meta:
@@ -334,7 +344,7 @@ def main():
     print("=" * 60)
     print()
 
-    save_path = os.path.join(out_dir, f"model_{stamp_long}")
+    save_path = os.path.join(out_dir, f"model_{stamp}")
     print(f"Outputs will be written to: {out_dir}/")
     print()
 

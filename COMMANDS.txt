@@ -31,39 +31,9 @@ python3 train.py --data lorenz/delay_xcoordinate_d10_3.npz \
   --scheduler_patience 500 \
   --scheduler_factor 0.5 \
   --scheduler_min_lr 1e-5 \
-  --print_frequency 100
+  --print_frequency 100 \
+  --seed 42
 
-
-## Pendulum
-cd examples/pendulum
-python3 generate_pendulum.py
-
-cd ..
-python3 show_input.py --data pendulum/pendulum_data.npz
-
-python3 train.py --data pendulum/pendulum_data.npz \
-  --latent_dim 2 \
-  --poly_order 2 \
-  --include_sine \
-  --widths 128,64 \
-  --activation tanh \
-  --loss_weight_decoder 1.0 \
-  --loss_weight_sindy_z 0.01 \
-  --loss_weight_sindy_x 0.01 \
-  --loss_weight_sindy_reg 1e-3 \
-  --loss_weight_coord 0.0 \
-  --coefficient_threshold 0.15 \
-  --threshold_frequency 1000 \
-  --max_epochs 15001 \
-  --refinement_epochs 3001 \
-  --batch_size 1024 \
-  --learning_rate 1e-3 \
-  --patience 8 \
-  --scheduler_type plateau \
-  --scheduler_patience 500 \
-  --scheduler_factor 0.5 \
-  --scheduler_min_lr 5e-4 \
-  --print_frequency 100
 
 
 ## Van der pol
@@ -73,20 +43,173 @@ python3 train.py --data vander/delay_xcoordinate_d10_3.npz \
   --widths 64,32 \
   --activation tanh \
   --loss_weight_decoder 1.0 \
-  --loss_weight_sindy_x 1e-4 \
-  --loss_weight_sindy_z 1e-3 \
-  --loss_weight_coord 0.2 \
-  --loss_weight_cons 0.02 \
+  --loss_weight_sindy_x 5e-4 \
+  --loss_weight_sindy_z 5e-3 \
+  --loss_weight_coord 3e-1 \
+  --loss_weight_cons 1e-1 \
   --loss_weight_sindy_reg 1e-3 \
-  --coefficient_threshold 0.15 \
+  --coefficient_threshold 0.1 \
   --threshold_frequency 500 \
-  --max_epochs 2001 \
-  --refinement_epochs 201 \
+  --max_epochs 3001 \
+  --refinement_epochs 501 \
+  --batch_size 1024 \
+  --learning_rate 5e-4 \
+  --patience 12 \
+  --scheduler_type plateau \
+  --scheduler_patience 400 \
+  --scheduler_factor 0.5 \
+  --scheduler_min_lr 1e-5 \
+  --print_frequency 100 \
+  --seed 42
+
+## 3planet
+cd examples/3planet
+python3 generate_3body_delay.py --delay_dim 15 --delay_steps 30 --train_periods 50
+
+cd ..
+python3 train.py --data 3planet/delay_3body_x1_d15_30.npz \
+  --latent_dim 4 \
+  --poly_order 2 \
+  --include_sine \
+  --widths 64,32 \
+  --activation tanh \
+  --loss_weight_decoder 1.0 \
+  --loss_weight_sindy_x 1.0 \
+  --loss_weight_sindy_z 1.0 \
+  --loss_weight_coord 5e-2 \
+  --loss_weight_cons 5e-1 \
+  --loss_weight_sindy_reg 1e-4 \
+  --coefficient_threshold 0.3 \
+  --threshold_frequency 500 \
+  --max_epochs 1501 \
+  --refinement_epochs 301 \
   --batch_size 1024 \
   --learning_rate 1e-3 \
-  --patience 8 \
+  --patience 10 \
   --scheduler_type plateau \
   --scheduler_patience 500 \
   --scheduler_factor 0.5 \
   --scheduler_min_lr 1e-5 \
-  --print_frequency 100
+  --print_frequency 100 \
+  --seed 42
+
+## Real Pulse (GE_P1, 300 Hz)
+cd examples/real_data
+python3 generate_real.py --delay_dim 20 --delay_steps 5 \
+  --train_seconds 600 --val_seconds 90 --test_seconds 90
+
+cd ..
+
+# (A) latent_dim=5, conservative
+python3 train.py --data real_data/delay_ge_p1_d20_5.npz \
+  --latent_dim 5 \
+  --poly_order 3 \
+  --include_sine \
+  --widths 64,32 \
+  --activation tanh \
+  --loss_weight_decoder 1.0 \
+  --loss_weight_sindy_x 1e-2 \
+  --loss_weight_sindy_z 1e-2 \
+  --loss_weight_coord 1e-1 \
+  --loss_weight_cons 5e-2 \
+  --loss_weight_sindy_reg 1e-4 \
+  --coefficient_threshold 0.1 \
+  --threshold_frequency 500 \
+  --max_epochs 3001 \
+  --refinement_epochs 501 \
+  --batch_size 1024 \
+  --learning_rate 1e-3 \
+  --patience 15 \
+  --scheduler_type plateau \
+  --scheduler_patience 600 \
+  --scheduler_factor 0.5 \
+  --scheduler_min_lr 1e-5 \
+  --print_frequency 100 \
+  --seed 42
+
+# (B) latent_dim=5, aggressive
+python3 train.py --data real_data/delay_ge_p1_d20_5.npz \
+  --latent_dim 5 \
+  --poly_order 3 \
+  --include_sine \
+  --widths 64,32 \
+  --activation tanh \
+  --loss_weight_decoder 1.0 \
+  --loss_weight_sindy_x 1e-1 \
+  --loss_weight_sindy_z 1e-1 \
+  --loss_weight_coord 3e-1 \
+  --loss_weight_cons 2e-1 \
+  --loss_weight_sindy_reg 1e-3 \
+  --coefficient_threshold 0.25 \
+  --threshold_frequency 400 \
+  --max_epochs 2001 \
+  --refinement_epochs 301 \
+  --batch_size 1024 \
+  --learning_rate 1e-3 \
+  --patience 10 \
+  --scheduler_type plateau \
+  --scheduler_patience 400 \
+  --scheduler_factor 0.5 \
+  --scheduler_min_lr 1e-5 \
+  --print_frequency 100 \
+  --seed 42
+
+# (C) latent_dim=6, conservative
+python3 train.py --data real_data/delay_ge_p1_d20_5.npz \
+  --latent_dim 6 \
+  --poly_order 3 \
+  --include_sine \
+  --widths 64,32 \
+  --activation tanh \
+  --loss_weight_decoder 1.0 \
+  --loss_weight_sindy_x 1e-2 \
+  --loss_weight_sindy_z 1e-2 \
+  --loss_weight_coord 1e-1 \
+  --loss_weight_cons 5e-2 \
+  --loss_weight_sindy_reg 1e-4 \
+  --coefficient_threshold 0.1 \
+  --threshold_frequency 500 \
+  --max_epochs 3001 \
+  --refinement_epochs 501 \
+  --batch_size 1024 \
+  --learning_rate 1e-3 \
+  --patience 15 \
+  --scheduler_type plateau \
+  --scheduler_patience 600 \
+  --scheduler_factor 0.5 \
+  --scheduler_min_lr 1e-5 \
+  --print_frequency 100 \
+  --seed 42
+
+# (D) latent_dim=6, aggressive
+python3 train.py --data real_data/delay_ge_p1_d20_5.npz \
+  --latent_dim 6 \
+  --poly_order 3 \
+  --include_sine \
+  --widths 64,32 \
+  --activation tanh \
+  --loss_weight_decoder 1.0 \
+  --loss_weight_sindy_x 1e-1 \
+  --loss_weight_sindy_z 1e-1 \
+  --loss_weight_coord 3e-1 \
+  --loss_weight_cons 2e-1 \
+  --loss_weight_sindy_reg 1e-3 \
+  --coefficient_threshold 0.25 \
+  --threshold_frequency 400 \
+  --max_epochs 2001 \
+  --refinement_epochs 301 \
+  --batch_size 1024 \
+  --learning_rate 1e-3 \
+  --patience 10 \
+  --scheduler_type plateau \
+  --scheduler_patience 400 \
+  --scheduler_factor 0.5 \
+  --scheduler_min_lr 1e-5 \
+  --print_frequency 100 \
+  --seed 42
+
+# After training: pick a model_<stamp>.mat and produce eval + figures
+# python3 analyze.py --mat real_data/checkpoints/<dir>/model_<stamp>.mat \
+#                    --data real_data/delay_ge_p1_d20_5.npz
+# cd real_data
+# python3 visualize_real.py --eval checkpoints/<dir>/eval_<stamp>.npz

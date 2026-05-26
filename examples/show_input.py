@@ -128,19 +128,13 @@ def plot_pca3d_single(pcs, t, var_ratio, title, out_path):
 
 
 def plot_pca2d_multi(pcs_list, var_ratio, title, out_path):
-    """Multi-IC overlay: each IC gets its own colour, alpha fades over time."""
+    """Multi-IC overlay: trajectory lines with start/end markers per IC."""
     fig, ax = plt.subplots(figsize=(7, 6))
     for i, pcs in enumerate(pcs_list):
         col = _IC_COLORS[i % len(_IC_COLORS)]
-        n   = len(pcs)
-        # alpha gradient: early = transparent, late = opaque
-        alphas = np.linspace(0.2, 0.9, n)
-        ax.plot(pcs[:, 0], pcs[:, 1], lw=0.5, color=col, alpha=0.3, zorder=1)
-        # scatter every few points to keep the plot light
-        step = max(1, n // 150)
-        idx  = np.arange(0, n, step)
-        ax.scatter(pcs[idx, 0], pcs[idx, 1],
-                   color=col, s=4, alpha=alphas[idx], linewidths=0, zorder=2)
+        ax.plot(pcs[:, 0], pcs[:, 1], lw=0.6, color=col, alpha=0.6, zorder=1)
+        ax.scatter(*pcs[0,  :2], color=col, s=15, marker="o", zorder=3)
+        ax.scatter(*pcs[-1, :2], color=col, s=15, marker="x", zorder=3)
     ax.set_xlabel(f"PC1  ({var_ratio[0]*100:.1f}% var)")
     ax.set_ylabel(f"PC2  ({var_ratio[1]*100:.1f}% var)")
     ax.set_title(title, fontsize=9)
@@ -151,21 +145,18 @@ def plot_pca2d_multi(pcs_list, var_ratio, title, out_path):
 
 
 def plot_pca3d_multi(pcs_list, var_ratio, title, out_path):
-    """Multi-IC overlay: each IC gets its own colour."""
+    """Multi-IC overlay: trajectory lines with start/end markers per IC."""
     fig = plt.figure(figsize=(8, 7))
     ax  = fig.add_subplot(111, projection="3d")
     for i, pcs in enumerate(pcs_list):
-        col  = _IC_COLORS[i % len(_IC_COLORS)]
-        n    = len(pcs)
-        step = max(1, n // 150)
-        idx  = np.arange(0, n, step)
+        col = _IC_COLORS[i % len(_IC_COLORS)]
         ax.plot(pcs[:, 0], pcs[:, 1], pcs[:, 2],
-                lw=0.4, color=col, alpha=0.3, zorder=1)
-        ax.scatter(pcs[idx, 0], pcs[idx, 1], pcs[idx, 2],
-                   color=col, s=3, alpha=0.6, zorder=2)
-    ax.set_xlabel(f"PC1 ({var_ratio[0]*100:.1f}%)")
-    ax.set_ylabel(f"PC2 ({var_ratio[1]*100:.1f}%)")
-    ax.set_zlabel(f"PC3 ({var_ratio[2]*100:.1f}%)")
+                lw=0.5, color=col, alpha=0.6, zorder=1)
+        ax.scatter(*pcs[0,  :3], color=col, s=15, marker="o", zorder=3)
+        ax.scatter(*pcs[-1, :3], color=col, s=15, marker="x", zorder=3)
+    ax.set_xlabel(f"PC1 ({var_ratio[0]*100:.1f}%)", fontsize=15)
+    ax.set_ylabel(f"PC2 ({var_ratio[1]*100:.1f}%)", fontsize=15)
+    ax.set_zlabel(f"PC3 ({var_ratio[2]*100:.1f}%)", fontsize=15)
     ax.set_title(title, fontsize=9)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
@@ -186,8 +177,12 @@ def main():
     parser.add_argument("--n_ics",   type=int, default=None,
                         help="Overlay this many ICs (starting from IC 0). "
                              "When set, --ic is ignored.")
-    parser.add_argument("--n_comps", type=int, default=3,
+    parser.add_argument("--n_comps",      type=int,   default=3,
                         help="Number of PCA components (default: 3)")
+    parser.add_argument("--plot_seconds", type=float, default=None,
+                        help="Only use this many seconds from the start of each IC "
+                             "when fitting and plotting PCA (useful for long continuous "
+                             "trajectories that appear as dense blobs; default: use all).")
     args = parser.parse_args()
 
     data_path = args.data
@@ -232,15 +227,33 @@ def main():
     n_ics_total = N // n_steps
     t_ic = t_arr if t_arr is not None else np.arange(n_steps)
 
+    # ── Optionally cap the number of samples plotted per IC ──────────────────
+    if args.plot_seconds is not None:
+        dt_val = meta.get("dt")
+        if dt_val is None and t_arr is not None and len(t_arr) > 1:
+            dt_val = float(t_arr[1] - t_arr[0])
+        if dt_val is None:
+            raise ValueError(
+                "Cannot use --plot_seconds: no 'dt' in npz and train_t is absent."
+            )
+        n_plot = max(2, min(n_steps, int(round(args.plot_seconds / dt_val))))
+        if n_plot < n_steps:
+            print(f"  --plot_seconds={args.plot_seconds}s → using first {n_plot:,} "
+                  f"of {n_steps:,} samples per IC  "
+                  f"(dt={dt_val:.5f} s, {args.plot_seconds:.1f} s)")
+        t_ic = t_ic[:n_plot]
+    else:
+        n_plot = n_steps
+
     multi_mode = args.n_ics is not None
-    n_comps = min(max(args.n_comps, 3), D, n_steps)
+    n_comps = min(args.n_comps, D, n_steps)
 
     if multi_mode:
         k = min(args.n_ics, n_ics_total)
         print(f"\nOverlay mode: using {k} ICs (out of {n_ics_total} available)")
 
         # Fit PCA on all k ICs stacked together for a consistent projection
-        X_stack = np.vstack([_extract_ic(X, n_steps, i) for i in range(k)])
+        X_stack = np.vstack([_extract_ic(X, n_steps, i)[:n_plot] for i in range(k)])
         print(f"Fitting PCA ({n_comps} components) on {len(X_stack):,} points ...")
         pca = PCA(n_components=n_comps)
         pca.fit(X_stack)
@@ -252,9 +265,9 @@ def main():
             print(f"    PC{i+1}: {v*100:.2f}%   (cumulative {cv*100:.2f}%)")
 
         # Project each IC separately for plotting
-        pcs_list = [pca.transform(_extract_ic(X, n_steps, i)) for i in range(k)]
+        pcs_list = [pca.transform(_extract_ic(X, n_steps, i)[:n_plot]) for i in range(k)]
 
-        title   = _meta_title(meta, stem) + f"  |  {k} ICs overlaid"
+        title   = _meta_title(meta, stem) + f"  |  {k} Initial Conditions"
         tag     = f"{k}ics"
         out2d   = os.path.join(out_dir, f"pca2d_{stem}_{tag}.png")
         out3d   = os.path.join(out_dir, f"pca3d_{stem}_{tag}.png")
@@ -265,8 +278,8 @@ def main():
     else:
         ic_idx = args.ic
         print(f"\nSingle IC mode: IC {ic_idx} / {n_ics_total}")
-        X_ic = _extract_ic(X, n_steps, ic_idx)
-        print(f"Fitting PCA ({n_comps} components) on {n_steps} points ...")
+        X_ic = _extract_ic(X, n_steps, ic_idx)[:n_plot]
+        print(f"Fitting PCA ({n_comps} components) on {len(X_ic):,} points ...")
         pca  = PCA(n_components=n_comps)
         pcs  = pca.fit_transform(X_ic)
 

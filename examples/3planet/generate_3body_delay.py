@@ -136,9 +136,15 @@ def main():
     print("3-Body (BHH) Data Generation — Delay embedding of x_1 coordinate")
     print(f"  Embedding dim  : {args.delay_dim}  (d)")
     print(f"  Delay step     : {args.delay_steps} steps  (τ = {args.delay_steps*args.dt:.3f} s)")
-    print(f"  Train samples  : {train['x'].shape[0]:,}")
-    print(f"  Val samples    : {val['x'].shape[0]:,}")
-    print(f"  Test samples   : {test['x'].shape[0]:,}")
+    t0_train = 0.0
+    t1_train = args.train_periods * T_PERIOD
+    t0_val   = t1_train
+    t1_val   = t0_val + args.val_periods * T_PERIOD
+    t0_test  = t1_val
+    t1_test  = t0_test + args.test_periods * T_PERIOD
+    print(f"  train          : {t0_train:.1f} s ~ {t1_train:.1f} s  ({train['x'].shape[0]:,} samples)")
+    print(f"  val            : {t0_val:.1f} s ~ {t1_val:.1f} s  ({val['x'].shape[0]:,} samples)")
+    print(f"  test           : {t0_test:.1f} s ~ {t1_test:.1f} s  ({test['x'].shape[0]:,} samples)")
     print(f"  Output         : {args.out}")
     print("=" * 60)
 
