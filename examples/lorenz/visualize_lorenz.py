@@ -1,501 +1,635 @@
 """Visualize trained Lorenz model: learned latent dynamics vs true Lorenz.
 
-Generates 6 figures saved next to the .mat checkpoint:
-    fig1_3d_attractor.png     - 3D attractor: true z vs learned latent ξ (all test ICs)
-    fig2_time_series.png      - Time series: true z₀z₁z₂ vs latent ξ₀ξ₁ξ₂ (1 IC)
-    fig3_reconstruction.png   - Input x and dx reconstruction quality (1 IC)
-    fig4_sindy_simulation.png - SINDy ODE forward simulation vs encoder trajectory
-    fig4b_sindy_3d.png        - 3D: encoder trajectory vs SINDy propagated trajectory
-    fig5_multi_ic_attractor.png - Multi-IC 3D: encoder vs SINDy attractor coverage
+Reads precomputed data from `eval_<stamp>.npz` (produced by ../analyze.py).
+
+Generates figures saved next to the eval npz:
+    fig0_1_train_reconstruction.png    - [Training] x and dx reconstruction (1 IC)
+    fig0_2_train_sindy_simulation.png  - [Training] SINDy ODE forward vs encoder (1 IC)
+    fig0_3_train_x_comparison.png      - [Training] x(t): true vs encoder/SINDy decoded (1 IC)
+    fig1_3d_attractor.png       - 3D attractor: true z vs learned latent xi (all test ICs)
+    fig2_reconstruction.png     - Input x and dx reconstruction quality (1 IC)
+    fig3_time_series.png        - Time series: true z0z1z2 vs latent xi0xi1xi2 (1 IC)
+    fig4_sindy_simulation.png   - SINDy ODE forward simulation vs encoder trajectory
+    fig4b_sindy_2d.png          - 2D pairwise latent panels: encoder vs SINDy propagated
+    fig4c_sindy_overlay.gif     - 3D animated overlay: encoder and SINDy simultaneously
+    fig5_long_term_phase.png    - Long-term continuous 3D phase portrait comparison (topology check)
+    fig6_x_comparison.png       - Observable x(t): true vs encoder-decoded vs SINDy-decoded
 
 Usage (run from examples/lorenz/):
-    python3 visualize_lorenz.py --mat model_YYYYMMDD_HHMMSS.mat --data legendre_full.npz
-    python3 visualize_lorenz.py --mat model_YYYYMMDD_HHMMSS.mat --data legendre_full.npz --ic 3
-    python3 visualize_lorenz.py --mat model_YYYYMMDD_HHMMSS.mat --data legendre_full.npz --n_ics_plot 20
+    python3 visualize_lorenz.py --eval checkpoints/<dir>/eval_<stamp>.npz
+    python3 visualize_lorenz.py --eval ... --ic 3
+    python3 visualize_lorenz.py --eval ... --n_ics_plot 15
 """
 import os
-import sys
 import argparse
 
-_THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-_REPO_ROOT = os.path.abspath(os.path.join(_THIS_DIR, "..", ".."))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
-
 import numpy as np
-import torch
 import matplotlib
-matplotlib.use('Agg')  # non-interactive; works on server without display
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
-from scipy.integrate import solve_ivp
-
-from sindyae import load_model_mat, load_model_json
-from sindyae.sindy_library import sindy_library_torch, sindy_library_torch_order2
-from sindyae.autoencoder import _seq_jvp
 
 
-# ─── helpers ────────────────────────────────────────────────────────────────
+# ─── Loader & helpers ────────────────────────────────────────────────────────
 
-def _encode(model, x_np, device, bs=4096):
-    """numpy [N,128] → numpy [N,3]."""
-    out = []
-    for i in range(0, len(x_np), bs):
-        xb = torch.tensor(x_np[i:i+bs], dtype=torch.float32, device=device)
-        with torch.no_grad():
-            out.append(model.encoder(xb).cpu().numpy())
-    return np.concatenate(out)
-
-
-def _decode(model, z_np, device, bs=4096):
-    """numpy [N,3] → numpy [N,128]."""
-    out = []
-    for i in range(0, len(z_np), bs):
-        zb = torch.tensor(z_np[i:i+bs], dtype=torch.float32, device=device)
-        with torch.no_grad():
-            out.append(model.decoder(zb).cpu().numpy())
-    return np.concatenate(out)
-
-
-def _sindy_rhs(Xi, poly_order, include_sine):
-    """Return a scipy-compatible RHS function for the learned SINDy ODE (order 1)."""
-    def rhs(t, z):
-        zt = torch.tensor(z, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
-            Theta = sindy_library_torch(zt, poly_order, include_sine)
-        return (Theta.numpy() @ Xi)[0]
-    return rhs
-
-
-def _sindy_rhs_order2(Xi, latent_dim, poly_order, include_sine):
-    """Return a scipy-compatible RHS for a 2nd-order SINDy ODE.
-
-    State vector: [z (latent_dim), dz (latent_dim)].
-    Returns [dz, ddz] where ddz = Theta(z, dz) @ Xi.
-    """
-    def rhs(t, state):
-        z  = state[:latent_dim]
-        dz = state[latent_dim:]
-        zt  = torch.tensor(z,  dtype=torch.float32).unsqueeze(0)
-        dzt = torch.tensor(dz, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
-            Theta = sindy_library_torch_order2(zt, dzt, poly_order, include_sine)
-        ddz = (Theta.numpy() @ Xi)[0]
-        return np.concatenate([dz, ddz])
-    return rhs
+def _load_eval(path):
+    npz = np.load(path, allow_pickle=False)
+    out = {}
+    for k in npz.files:
+        v = npz[k]
+        if v.ndim == 0 and v.dtype.kind not in ("O", "U", "S"):
+            out[k] = v.item()
+        else:
+            out[k] = v
+    return out
 
 
 def _ic_slice(ic_idx, n_steps):
     return slice(ic_idx * n_steps, (ic_idx + 1) * n_steps)
 
 
-# ─── figure 1: 3D attractor comparison ──────────────────────────────────────
+def _ic_ok(ev, split, ic):
+    key = f"{split}_sindy_ok"
+    if key not in ev:
+        return False
+    flags = ev[key]
+    return bool(flags[ic]) if ic < len(flags) else False
 
-def fig1_3d_attractor(model, test_data, device, out_dir):
-    """True Lorenz z-space vs learned latent ξ-space (all ICs)."""
-    has_z = 'z' in test_data
-    if has_z:
-        z_true = test_data['z'].reshape(-1, 3)       # [N*T, 3] normalized
+
+# ─── figure 0_1: training reconstruction ─────────────────────────────────────
+
+def fig0_1_train_reconstruction(ev, out_dir, ic_idx):
+    """[Training] x and dx reconstruction quality for a single IC."""
+    if "train_x" not in ev:
+        print("  Skipping fig0_1: no train data in eval npz.")
+        return
+
+    t       = ev["train_t"]
+    n_steps = len(t)
+    n_ics   = ev["train_x"].shape[0] // n_steps
+    if ic_idx >= n_ics:
+        print(f"  Skipping fig0_1: train has {n_ics} ICs, requested #{ic_idx}.")
+        return
+    sl      = _ic_slice(ic_idx, n_steps)
+
+    x_np  = ev["train_x"][sl]
+    x_dec = ev["train_x_dec"][sl]
+
+    order2 = ev.get("model_order", 1) == 2
+    if order2 and "train_ddx" in ev and "train_ddx_dec" in ev:
+        deriv_np    = ev["train_ddx"][sl]
+        deriv_dec   = ev["train_ddx_dec"][sl]
+        deriv_label = "ddx"
     else:
-        z_true = test_data['x'][:, :3]               # first 3 delay dims as proxy
-    z_lat  = _encode(model, test_data['x'], device)  # [N*T, 3]
+        deriv_np    = ev["train_dx"][sl]
+        deriv_dec   = ev["train_dx_dec"][sl]
+        deriv_label = "dx"
 
-    fig = plt.figure(figsize=(14, 6))
+    n_dims = x_np.shape[1]
+    dims = [0, n_dims // 2, n_dims - 1]
 
-    ax1 = fig.add_subplot(121, projection='3d')
-    ax1.plot(z_true[:, 0], z_true[:, 1], z_true[:, 2],
-             color='steelblue', lw=0.25, alpha=0.5)
-    if has_z:
-        ax1.set_title('True Lorenz attractor\n(normalized z₀, z₁, z₂)', fontsize=12)
-        ax1.set_xlabel('z₀'); ax1.set_ylabel('z₁'); ax1.set_zlabel('z₂')
-    else:
-        ax1.set_title('Observed delay coordinates\n(x[t], x[t-τ], x[t-2τ])', fontsize=12)
-        ax1.set_xlabel('x[t]'); ax1.set_ylabel('x[t-τ]'); ax1.set_zlabel('x[t-2τ]')
+    fig, axes = plt.subplots(3, 2, figsize=(14, 9), sharex=True)
+    for row, d in enumerate(dims):
+        axes[row, 0].plot(t, x_np[:, d],  "steelblue", lw=1.5, label="True")
+        axes[row, 0].plot(t, x_dec[:, d], "tomato",    lw=1.2, ls="--", label="Decoded")
+        axes[row, 0].set_ylabel(f"x[{d}]")
+        axes[row, 0].legend(fontsize=8); axes[row, 0].grid(True, alpha=0.3)
 
-    ax2 = fig.add_subplot(122, projection='3d')
-    ax2.plot(z_lat[:, 0], z_lat[:, 1], z_lat[:, 2],
-             color='tomato', lw=0.25, alpha=0.5)
-    ax2.set_title('Learned latent attractor\n(encoder output ξ₀, ξ₁, ξ₂)', fontsize=12)
-    ax2.set_xlabel('ξ₀'); ax2.set_ylabel('ξ₁'); ax2.set_zlabel('ξ₂')
+        axes[row, 1].plot(t, deriv_np[:, d],  "steelblue", lw=1.5, label="True")
+        axes[row, 1].plot(t, deriv_dec[:, d], "tomato",    lw=1.2, ls="--", label="Decoded")
+        axes[row, 1].set_ylabel(f"{deriv_label}[{d}]")
+        axes[row, 1].legend(fontsize=8); axes[row, 1].grid(True, alpha=0.3)
 
-    fig.suptitle('3D Attractor Comparison — All Test ICs', fontsize=13, fontweight='bold')
+    axes[0, 0].set_title("Input reconstruction  x", fontsize=11)
+    axes[0, 1].set_title(f"Derivative reconstruction  {deriv_label}", fontsize=11)
+    axes[-1, 0].set_xlabel("t"); axes[-1, 1].set_xlabel("t")
+
+    rel_x     = np.mean((x_dec     - x_np    ) ** 2) / np.mean(x_np     ** 2)
+    rel_deriv = np.mean((deriv_dec - deriv_np) ** 2) / np.mean(deriv_np ** 2)
+    fig.suptitle(
+        f"[Training] Reconstruction Quality — IC #{ic_idx}\n"
+        f"relative err x: {rel_x:.2e}   relative err {deriv_label}: {rel_deriv:.2e}",
+        fontsize=12, fontweight="bold",
+    )
     plt.tight_layout()
-    path = os.path.join(out_dir, 'fig1_3d_attractor.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
+    path = os.path.join(out_dir, "fig0_1_train_reconstruction.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {path}")
 
 
-# ─── figure 2: per-dimension time series ─────────────────────────────────────
+# ─── figure 0_2: training SINDy forward simulation ───────────────────────────
 
-def fig2_time_series(model, test_data, device, out_dir, ic_idx):
-    """True z₀z₁z₂ vs latent ξ₀ξ₁ξ₂ over time (single IC)."""
-    t       = test_data['t']                          # [T]
+def fig0_2_train_sindy_simulation(ev, out_dir, ic_idx):
+    """[Training] Encoder trajectory vs SINDy ODE forward simulation (single IC, main plot only)."""
+    if "train_x" not in ev:
+        print("  Skipping fig0_2: no train data in eval npz.")
+        return
+
+    t       = ev["train_t"]
+    n_steps = len(t)
+    n_ics   = ev["train_x"].shape[0] // n_steps
+    if ic_idx >= n_ics:
+        print(f"  Skipping fig0_2: train has {n_ics} ICs, requested #{ic_idx}.")
+        return
+    sl      = _ic_slice(ic_idx, n_steps)
+
+    z_enc   = ev["train_z_enc"][sl]
+    sim_ok  = _ic_ok(ev, "train", ic_idx)
+    z_sindy = ev["train_z_sindy"][sl] if "train_z_sindy" in ev else None
+    if z_sindy is None or np.any(np.isnan(z_sindy)):
+        sim_ok = False
+    latent_dim = z_enc.shape[1]
+
+    fig, axes = plt.subplots(latent_dim, 1, figsize=(12, 3 * latent_dim), sharex=True)
+    axes = np.atleast_1d(axes)
+    for i in range(latent_dim):
+        axes[i].plot(t, z_enc[:, i], "steelblue", lw=1.4, label=f"Encoder xi{i}")
+        if sim_ok:
+            axes[i].plot(t, z_sindy[:, i], "tomato", lw=1.2, ls="--",
+                         label=f"SINDy ODE xi{i}")
+        axes[i].set_ylabel(f"xi{i}")
+        axes[i].legend(fontsize=9); axes[i].grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel("t")
+    status = "converged" if sim_ok else "DIVERGED"
+    axes[0].set_title(
+        f"[Training] SINDy Forward Simulation vs Encoder Trajectory — IC #{ic_idx}  [{status}]",
+        fontsize=12, fontweight="bold",
+    )
+    plt.tight_layout()
+    path = os.path.join(out_dir, "fig0_2_train_sindy_simulation.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+# ─── figure 0_3: training observable dimension comparison ────────────────────
+
+def fig0_3_train_x_comparison(ev, out_dir, ic_idx):
+    """[Training] Compare true x(t) vs encoder->decoder x(t) vs SINDy->decoder x(t) on dim 0."""
+    if "train_x" not in ev:
+        print("  Skipping fig0_3: no train data in eval npz.")
+        return
+
+    t       = ev["train_t"]
+    n_steps = len(t)
+    n_ics   = ev["train_x"].shape[0] // n_steps
+    if ic_idx >= n_ics:
+        print(f"  Skipping fig0_3: train has {n_ics} ICs, requested #{ic_idx}.")
+        return
+    sl      = _ic_slice(ic_idx, n_steps)
+
+    x_np    = ev["train_x"][sl]
+    x_enc   = ev["train_x_dec"][sl]
+    sim_ok  = _ic_ok(ev, "train", ic_idx)
+    x_sindy = ev["train_x_sindy"][sl] if "train_x_sindy" in ev else None
+    if x_sindy is None or np.any(np.isnan(x_sindy)):
+        sim_ok = False
+
+    if not sim_ok:
+        print("  Skipping fig0_3: training SINDy integration diverged.")
+        return
+
+    x0_true  = x_np[:, 0]
+    x0_enc   = x_enc[:, 0]
+    x0_sindy = x_sindy[:, 0]
+
+    err_enc   = (x0_enc   - x0_true) ** 2
+    err_sindy = (x0_sindy - x0_true) ** 2
+
+    fig, (ax_ts, ax_err) = plt.subplots(
+        2, 1, figsize=(12, 8), sharex=True,
+        gridspec_kw={"height_ratios": [1.4, 1], "hspace": 0.35},
+    )
+
+    ax_ts.plot(t, x0_true,  color="#333333",   lw=1.5, label="True x(t)")
+    ax_ts.plot(t, x0_enc,   color="steelblue", lw=1.2, ls="--", label="Encoder->Decoder")
+    ax_ts.plot(t, x0_sindy, color="tomato",    lw=1.2, ls=":",  label="SINDy->Decoder")
+    ax_ts.set_ylabel("x(t)  [observable dim]", fontsize=11)
+    ax_ts.set_title("Observable Dimension: True x(t) vs Reconstructions", fontsize=12)
+    ax_ts.legend(fontsize=10); ax_ts.grid(True, alpha=0.3)
+
+    ax_err.semilogy(t, err_enc,   color="steelblue", lw=1.4, label="Encoder err²")
+    ax_err.semilogy(t, err_sindy, color="tomato",    lw=1.4, ls="--", label="SINDy err²")
+    ax_err.set_xlabel("t", fontsize=11)
+    ax_err.set_ylabel("Squared error  x(t)", fontsize=11)
+    ax_err.set_title("Pointwise squared error on observable dimension", fontsize=12)
+    ax_err.legend(fontsize=10); ax_err.grid(True, which="both", alpha=0.3)
+
+    rmse_enc   = float(np.sqrt(np.mean(err_enc)))
+    rmse_sindy = float(np.sqrt(np.mean(err_sindy)))
+    fig.suptitle(
+        f"[Training] Observable Dimension Comparison — IC #{ic_idx}\n"
+        f"RMSE  Encoder: {rmse_enc:.4f}   SINDy: {rmse_sindy:.4f}",
+        fontsize=13, fontweight="bold",
+    )
+    path = os.path.join(out_dir, "fig0_3_train_x_comparison.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
+
+
+# ─── figure 1: 3D attractor comparison ──────────────────────────────────────
+
+def fig1_3d_attractor(ev, out_dir):
+    """True Lorenz z-space vs learned latent xi-space (all ICs)."""
+    has_z = "test_z" in ev
+    z_true = ev["test_z"].reshape(-1, 3) if has_z else ev["test_x"][:, :3]
+    z_lat  = ev["test_z_enc"]
+
+    fig = plt.figure(figsize=(12, 5))
+    ax1 = fig.add_subplot(121, projection="3d")
+    ax1.plot(z_true[:, 0], z_true[:, 1], z_true[:, 2],
+             color="steelblue", lw=0.25, alpha=0.5)
+    if has_z:
+        ax1.set_title("True Lorenz attractor\n(normalized z0, z1, z2)", fontsize=12)
+        ax1.set_xlabel("z0"); ax1.set_ylabel("z1"); ax1.set_zlabel("z2")
+    else:
+        ax1.set_title("Observed delay coordinates\n(x[t], x[t-tau], x[t-2tau])", fontsize=12)
+        ax1.set_xlabel("x[t]"); ax1.set_ylabel("x[t-tau]"); ax1.set_zlabel("x[t-2tau]")
+
+    ax2 = fig.add_subplot(122, projection="3d")
+    ax2.plot(z_lat[:, 0], z_lat[:, 1], z_lat[:, 2],
+             color="tomato", lw=0.25, alpha=0.5)
+    ax2.set_title("Learned latent attractor\n(encoder output xi0, xi1, xi2)", fontsize=12)
+    ax2.set_xlabel("xi0"); ax2.set_ylabel("xi1"); ax2.set_zlabel("xi2")
+
+    fig.suptitle("3D Attractor Comparison — All Test ICs", fontsize=13, fontweight="bold")
+    plt.tight_layout()
+    path = os.path.join(out_dir, "fig1_3d_attractor.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+# ─── figure 2: reconstruction quality ───────────────────────────────────────
+
+def fig2_reconstruction(ev, out_dir, ic_idx):
+    """x and dx reconstruction quality for a single IC."""
+    t       = ev["test_t"]
     n_steps = len(t)
     sl      = _ic_slice(ic_idx, n_steps)
-    has_z   = 'z' in test_data
-    if has_z:
-        z_true = test_data['z'][sl]                   # [T, 3]
-    else:
-        z_true = test_data['x'][sl, :3]               # first 3 delay dims as proxy [T, 3]
-    z_lat   = _encode(model, test_data['x'][sl], device)  # [T, 3]
 
-    colors_true = ['steelblue', 'darkorange', 'seagreen']
-    colors_lat  = ['tomato',    'orchid',     'goldenrod']
+    x_np  = ev["test_x"][sl]
+    x_dec = ev["test_x_dec"][sl]
+
+    order2 = ev.get("model_order", 1) == 2
+    if order2 and "test_ddx" in ev and "test_ddx_dec" in ev:
+        deriv_np   = ev["test_ddx"][sl]
+        deriv_dec  = ev["test_ddx_dec"][sl]
+        deriv_label = "ddx"
+    else:
+        deriv_np   = ev["test_dx"][sl]
+        deriv_dec  = ev["test_dx_dec"][sl]
+        deriv_label = "dx"
+
+    n_dims = x_np.shape[1]
+    dims = [0, n_dims // 2, n_dims - 1]
 
     fig, axes = plt.subplots(3, 2, figsize=(14, 9), sharex=True)
+    for row, d in enumerate(dims):
+        axes[row, 0].plot(t, x_np[:, d],  "steelblue", lw=1.5, label="True")
+        axes[row, 0].plot(t, x_dec[:, d], "tomato",    lw=1.2, ls="--", label="Decoded")
+        axes[row, 0].set_ylabel(f"x[{d}]")
+        axes[row, 0].legend(fontsize=8); axes[row, 0].grid(True, alpha=0.3)
 
+        axes[row, 1].plot(t, deriv_np[:, d],  "steelblue", lw=1.5, label="True")
+        axes[row, 1].plot(t, deriv_dec[:, d], "tomato",    lw=1.2, ls="--", label="Decoded")
+        axes[row, 1].set_ylabel(f"{deriv_label}[{d}]")
+        axes[row, 1].legend(fontsize=8); axes[row, 1].grid(True, alpha=0.3)
+
+    axes[0, 0].set_title("Input reconstruction  x", fontsize=11)
+    axes[0, 1].set_title(f"Derivative reconstruction  {deriv_label}", fontsize=11)
+    axes[-1, 0].set_xlabel("t"); axes[-1, 1].set_xlabel("t")
+
+    rel_x     = np.mean((x_dec     - x_np    ) ** 2) / np.mean(x_np     ** 2)
+    rel_deriv = np.mean((deriv_dec - deriv_np) ** 2) / np.mean(deriv_np ** 2)
+    fig.suptitle(
+        f"Reconstruction Quality — IC #{ic_idx}\n"
+        f"relative err x: {rel_x:.2e}   relative err {deriv_label}: {rel_deriv:.2e}",
+        fontsize=12, fontweight="bold",
+    )
+    plt.tight_layout()
+    path = os.path.join(out_dir, "fig2_reconstruction.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+# ─── figure 3: per-dimension time series ─────────────────────────────────────
+
+def fig3_time_series(ev, out_dir, ic_idx):
+    """True z0z1z2 vs latent xi0xi1xi2 over time (single IC)."""
+    t       = ev["test_t"]
+    n_steps = len(t)
+    sl      = _ic_slice(ic_idx, n_steps)
+    has_z   = "test_z" in ev
+    z_true  = ev["test_z"][sl] if has_z else ev["test_x"][sl, :3]
+    z_lat   = ev["test_z_enc"][sl]
+
+    colors_true = ["steelblue", "darkorange", "seagreen"]
+    colors_lat  = ["tomato",    "orchid",     "goldenrod"]
+
+    fig, axes = plt.subplots(3, 2, figsize=(14, 9), sharex=True)
     for i in range(3):
         axes[i, 0].plot(t, z_true[:, i], color=colors_true[i], lw=1.2)
-        if has_z:
-            axes[i, 0].set_ylabel(f'z{i} (true)', fontsize=10)
-        else:
-            axes[i, 0].set_ylabel(f'x_delay[{i}] (observed)', fontsize=10)
+        axes[i, 0].set_ylabel(f"z{i} (true)" if has_z else f"x_delay[{i}]", fontsize=10)
         axes[i, 0].grid(True, alpha=0.3)
 
         axes[i, 1].plot(t, z_lat[:, i], color=colors_lat[i], lw=1.2)
-        axes[i, 1].set_ylabel(f'ξ{i} (learned)', fontsize=10)
+        axes[i, 1].set_ylabel(f"xi{i} (learned)", fontsize=10)
         axes[i, 1].grid(True, alpha=0.3)
 
-    axes[0, 0].set_title('True Lorenz state' if has_z else 'Observed delay coordinates', fontsize=11)
-    axes[0, 1].set_title('Learned latent variables', fontsize=11)
-    axes[-1, 0].set_xlabel('t'); axes[-1, 1].set_xlabel('t')
+    axes[0, 0].set_title("True Lorenz state" if has_z else "Observed delay coordinates",
+                          fontsize=11)
+    axes[0, 1].set_title("Learned latent variables", fontsize=11)
+    axes[-1, 0].set_xlabel("t"); axes[-1, 1].set_xlabel("t")
 
-    fig.suptitle(f'Per-dimension Time Series — IC #{ic_idx}', fontsize=13, fontweight='bold')
+    fig.suptitle(f"Per-dimension Time Series — IC #{ic_idx}",
+                 fontsize=13, fontweight="bold")
     plt.tight_layout()
-    path = os.path.join(out_dir, 'fig2_time_series.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  Saved: {path}")
-
-
-# ─── figure 3: reconstruction quality ────────────────────────────────────────
-
-def fig3_reconstruction(model, test_data, device, out_dir, ic_idx):
-    """x and dx reconstruction quality for a single IC."""
-    t       = test_data['t']
-    n_steps = len(t)
-    sl      = _ic_slice(ic_idx, n_steps)
-
-    x_np  = test_data['x'][sl]
-    dx_np = test_data['dx'][sl]
-
-    x_t  = torch.tensor(x_np,  dtype=torch.float32, device=device)
-    dx_t = torch.tensor(dx_np, dtype=torch.float32, device=device)
-    ddx_t = None
-    if 'ddx' in test_data:
-        ddx_t = torch.tensor(test_data['ddx'][sl], dtype=torch.float32, device=device)
-
-    with torch.no_grad():
-        outputs = model(x_t, dx_t, ddx_t)
-    x_dec = outputs['x_decode'].cpu().numpy()
-
-    order2 = model.model_order == 2
-    if order2:
-        deriv_dec = outputs['ddx_decode'].cpu().numpy()
-        deriv_np  = test_data['ddx'][sl]
-        deriv_label = 'ddx'
-    else:
-        deriv_dec = outputs['dx_decode'].cpu().numpy()
-        deriv_np  = dx_np
-        deriv_label = 'dx'
-
-    n_dims = x_np.shape[1]
-    dims = [0, n_dims // 2, n_dims - 1]  # 3 representative input dimensions
-
-    fig, axes = plt.subplots(3, 2, figsize=(14, 9), sharex=True)
-
-    for row, d in enumerate(dims):
-        axes[row, 0].plot(t, x_np[:, d],    'steelblue', lw=1.5, label='True')
-        axes[row, 0].plot(t, x_dec[:, d],   'tomato',    lw=1.2, ls='--', label='Decoded')
-        axes[row, 0].set_ylabel(f'x[{d}]')
-        axes[row, 0].legend(fontsize=8); axes[row, 0].grid(True, alpha=0.3)
-
-        axes[row, 1].plot(t, deriv_np[:, d],  'steelblue', lw=1.5, label='True')
-        axes[row, 1].plot(t, deriv_dec[:, d], 'tomato',    lw=1.2, ls='--', label='Decoded')
-        axes[row, 1].set_ylabel(f'{deriv_label}[{d}]')
-        axes[row, 1].legend(fontsize=8); axes[row, 1].grid(True, alpha=0.3)
-
-    axes[0, 0].set_title('Input reconstruction  x', fontsize=11)
-    axes[0, 1].set_title(f'Derivative reconstruction  {deriv_label}', fontsize=11)
-    axes[-1, 0].set_xlabel('t'); axes[-1, 1].set_xlabel('t')
-
-    # Relative MSE annotations
-    rel_x     = np.mean((x_dec     - x_np    )**2) / np.mean(x_np    **2)
-    rel_deriv = np.mean((deriv_dec - deriv_np)**2) / np.mean(deriv_np**2)
-    fig.suptitle(
-        f'Reconstruction Quality — IC #{ic_idx}\n'
-        f'relative err x: {rel_x:.2e}   relative err {deriv_label}: {rel_deriv:.2e}',
-        fontsize=12, fontweight='bold'
-    )
-    plt.tight_layout()
-    path = os.path.join(out_dir, 'fig3_reconstruction.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
+    path = os.path.join(out_dir, "fig3_time_series.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {path}")
 
 
 # ─── figure 4: SINDy forward simulation ──────────────────────────────────────
 
-def fig4_sindy_simulation(model, params, test_data, device, out_dir, ic_idx):
-    """Integrate the learned SINDy ODE; compare with encoder trajectory."""
-    t       = test_data['t']
+def fig4_sindy_simulation(ev, out_dir, ic_idx):
+    """Encoder trajectory vs SINDy ODE forward simulation (single IC)."""
+    t       = ev["test_t"]
     n_steps = len(t)
     sl      = _ic_slice(ic_idx, n_steps)
-    x_np    = test_data['x'][sl]
 
-    # Initial latent state from encoder
-    x0  = torch.tensor(x_np[0:1],                      dtype=torch.float32, device=device)
-    dx0 = torch.tensor(test_data['dx'][sl][0:1],        dtype=torch.float32, device=device)
-    with torch.no_grad():
-        z0 = model.encoder(x0).cpu().numpy()[0]
+    z_enc   = ev["test_z_enc"][sl]
+    sim_ok  = _ic_ok(ev, "test", ic_idx)
+    z_sindy = ev["test_z_sindy"][sl] if "test_z_sindy" in ev else None
+    if z_sindy is None or np.any(np.isnan(z_sindy)):
+        sim_ok = False
+    latent_dim = z_enc.shape[1]
 
-    Xi           = (model.coefficient_mask * model.sindy_coefficients).detach().cpu().numpy()
-    poly_order   = params['poly_order']
-    include_sine = params.get('include_sine', False)
-    order2       = model.model_order == 2
-
-    # Integrate SINDy ODE
-    if order2:
-        _, dz0 = _seq_jvp(model.encoder, x0, dx0)
-        dz0 = dz0.detach().cpu().numpy()[0]
-        state0 = np.concatenate([z0, dz0])
-        rhs = _sindy_rhs_order2(Xi, model.latent_dim, poly_order, include_sine)
-    else:
-        state0 = z0
-        rhs = _sindy_rhs(Xi, poly_order, include_sine)
-
-    try:
-        sol = solve_ivp(rhs, [t[0], t[-1]], state0, t_eval=t,
-                        method='RK45', rtol=1e-6, atol=1e-9, max_step=0.02)
-        sim_ok  = sol.success and not np.any(np.isnan(sol.y))
-        z_sindy = sol.y[:model.latent_dim, :].T if sim_ok else None
-    except Exception as e:
-        print(f"  Warning: SINDy integration failed ({e})")
-        sim_ok, z_sindy = False, None
-
-    # True latent trajectory (encoder)
-    z_enc = _encode(model, x_np, device)  # [T, 3]
-
-    # ── time-series panel ─────────────────────────────────────────────────────
-    fig, axes = plt.subplots(4, 1, figsize=(12, 13))
-
-    for i in range(3):
-        axes[i].plot(t, z_enc[:, i], 'steelblue', lw=1.4, label='Encoder ξ%d' % i)
+    fig, axes = plt.subplots(latent_dim, 1, figsize=(12, 3 * latent_dim), sharex=True)
+    axes = np.atleast_1d(axes)
+    for i in range(latent_dim):
+        axes[i].plot(t, z_enc[:, i], "steelblue", lw=1.4, label=f"Encoder xi{i}")
         if sim_ok:
-            axes[i].plot(t, z_sindy[:, i], 'tomato', lw=1.2, ls='--',
-                         label='SINDy ODE ξ%d' % i)
-        axes[i].set_ylabel(f'ξ{i}')
+            axes[i].plot(t, z_sindy[:, i], "tomato", lw=1.2, ls="--",
+                         label=f"SINDy ODE xi{i}")
+        axes[i].set_ylabel(f"xi{i}")
         axes[i].legend(fontsize=9); axes[i].grid(True, alpha=0.3)
 
-    # Reconstruction MSE over time
-    x_from_enc = _decode(model, z_enc, device)
-    err_enc = np.mean((x_from_enc - x_np)**2, axis=1)
-    axes[3].semilogy(t, err_enc, 'steelblue', lw=1.4, label='Encoder → Decoder')
-    if sim_ok:
-        x_from_sindy = _decode(model, z_sindy, device)
-        err_sindy = np.mean((x_from_sindy - x_np)**2, axis=1)
-        axes[3].semilogy(t, err_sindy, 'tomato', lw=1.2, ls='--',
-                         label='SINDy ODE → Decoder')
-    axes[3].set_ylabel('MSE vs true x'); axes[3].set_xlabel('t')
-    axes[3].legend(fontsize=9); axes[3].grid(True, alpha=0.3)
-    axes[3].set_title('Pointwise reconstruction error over time')
-
-    status = 'converged' if sim_ok else '⚠ DIVERGED'
+    axes[-1].set_xlabel("t")
+    status = "converged" if sim_ok else "DIVERGED"
     axes[0].set_title(
-        f'SINDy Forward Simulation vs Encoder Trajectory — IC #{ic_idx}  [{status}]',
-        fontsize=12, fontweight='bold'
+        f"SINDy Forward Simulation vs Encoder Trajectory — IC #{ic_idx}  [{status}]",
+        fontsize=12, fontweight="bold",
     )
     plt.tight_layout()
-    path = os.path.join(out_dir, 'fig4_sindy_simulation.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
+    path = os.path.join(out_dir, "fig4_sindy_simulation.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"  Saved: {path}")
 
-    # ── 3D comparison panel ───────────────────────────────────────────────────
-    if sim_ok:
-        fig3d = plt.figure(figsize=(14, 6))
+    if not sim_ok:
+        return
 
-        ax1 = fig3d.add_subplot(121, projection='3d')
-        ax1.plot(z_enc[:, 0], z_enc[:, 1], z_enc[:, 2],
-                 color='steelblue', lw=1.0, alpha=0.85)
-        ax1.scatter(*z0, color='lime', s=60, zorder=5, label='IC')
-        ax1.set_title('Encoder trajectory\n(true data → encoder)', fontsize=11)
-        ax1.set_xlabel('ξ₀'); ax1.set_ylabel('ξ₁'); ax1.set_zlabel('ξ₂')
-        ax1.legend(fontsize=8)
+    # ── fig4b: pairwise 2D latent panels (encoder vs SINDy) ──
+    from itertools import combinations
+    pairs = list(combinations(range(latent_dim), 2))
+    n_pairs = len(pairs)
+    if n_pairs == 0:
+        return
 
-        ax2 = fig3d.add_subplot(122, projection='3d')
-        ax2.plot(z_sindy[:, 0], z_sindy[:, 1], z_sindy[:, 2],
-                 color='tomato', lw=1.0, alpha=0.85)
-        ax2.scatter(*z0, color='lime', s=60, zorder=5, label='IC')
-        ax2.set_title('SINDy propagated trajectory\n(learned ODE)', fontsize=11)
-        ax2.set_xlabel('ξ₀'); ax2.set_ylabel('ξ₁'); ax2.set_zlabel('ξ₂')
-        ax2.legend(fontsize=8)
+    fig2d, axes2d = plt.subplots(n_pairs, 2, figsize=(12, 4.5 * n_pairs))
+    axes2d = np.atleast_2d(axes2d)
+    for row, (i, j) in enumerate(pairs):
+        for col, (traj, color, title) in enumerate([
+            (z_enc,   "steelblue", "Encoder trajectory\n(true data -> encoder)"),
+            (z_sindy, "tomato",    "SINDy propagated trajectory\n(learned ODE)"),
+        ]):
+            ax = axes2d[row, col]
+            ax.plot(traj[:, i], traj[:, j], color=color, lw=0.8, alpha=0.85)
+            ax.scatter(traj[0,  i], traj[0,  j], color="lime",  s=60, zorder=6, label="start")
+            ax.scatter(traj[-1, i], traj[-1, j], color="black", s=60, zorder=6,
+                       marker="s", label="end")
+            ax.set_xlabel(f"xi{i}"); ax.set_ylabel(f"xi{j}")
+            if row == 0:
+                ax.set_title(title, fontsize=11)
+            ax.legend(fontsize=8); ax.grid(True, alpha=0.3)
 
-        fig3d.suptitle('3D Latent Space: Encoder vs SINDy ODE', fontsize=13, fontweight='bold')
-        plt.tight_layout()
-        path3d = os.path.join(out_dir, 'fig4b_sindy_3d.png')
-        plt.savefig(path3d, dpi=150, bbox_inches='tight')
-        plt.close()
-        print(f"  Saved: {path3d}")
-
-
-# ─── figure 5: multi-IC attractor coverage ────────────────────────────────────
-
-def fig5_multi_ic_attractor(model, params, test_data, device, out_dir, n_ics_plot=10):
-    """Multi-IC 3D attractor: encoder trajectories vs SINDy ODE (side-by-side).
-
-    Left panel : trajectories produced by the encoder on real data.
-    Right panel: trajectories produced by integrating the learned SINDy ODE
-                 from the same initial latent states.
-    Each IC gets a distinct colour; diverged SINDy runs are marked with ×.
-    """
-    t = test_data['t']
-    n_steps = len(t)
-    n_ics_total = test_data['x'].shape[0] // n_steps
-    n_show = min(n_ics_plot, n_ics_total)
-
-    # Evenly spaced IC indices across the test set
-    ic_indices = np.linspace(0, n_ics_total - 1, n_show, dtype=int)
-
-    Xi          = (model.coefficient_mask * model.sindy_coefficients).detach().cpu().numpy()
-    poly_order  = params['poly_order']
-    include_sine = params.get('include_sine', False)
-    order2      = model.model_order == 2
-
-    # Cycle through tab10; works for ≤10 ICs and wraps gracefully for more
-    colors = plt.cm.tab10(np.arange(n_show) % 10)
-
-    fig = plt.figure(figsize=(14, 6))
-    ax_enc = fig.add_subplot(121, projection='3d')
-    ax_sin = fig.add_subplot(122, projection='3d')
-
-    n_converged = 0
-    for ci, ic_idx in enumerate(ic_indices):
-        sl   = _ic_slice(ic_idx, n_steps)
-        x_np = test_data['x'][sl]
-        c    = colors[ci]
-
-        # ── encoder trajectory ──
-        z_enc = _encode(model, x_np, device)
-        ax_enc.plot(z_enc[:, 0], z_enc[:, 1], z_enc[:, 2],
-                    color=c, lw=0.7, alpha=0.75)
-        ax_enc.scatter(*z_enc[0], color=c, s=25, zorder=5)
-
-        # ── SINDy ODE trajectory ──
-        x0_t  = torch.tensor(x_np[0:1], dtype=torch.float32, device=device)
-        dx0_t = torch.tensor(test_data['dx'][sl][0:1], dtype=torch.float32, device=device)
-        with torch.no_grad():
-            z0_np = model.encoder(x0_t).cpu().numpy()[0]
-
-        if order2:
-            _, dz0_t = _seq_jvp(model.encoder, x0_t, dx0_t)
-            state0 = np.concatenate([z0_np, dz0_t.detach().cpu().numpy()[0]])
-            rhs = _sindy_rhs_order2(Xi, model.latent_dim, poly_order, include_sine)
-        else:
-            state0 = z0_np
-            rhs    = _sindy_rhs(Xi, poly_order, include_sine)
-
-        try:
-            sol = solve_ivp(rhs, [t[0], t[-1]], state0, t_eval=t,
-                            method='RK45', rtol=1e-6, atol=1e-9, max_step=0.02)
-            if sol.success and not np.any(np.isnan(sol.y)):
-                z_sin = sol.y[:model.latent_dim, :].T
-                ax_sin.plot(z_sin[:, 0], z_sin[:, 1], z_sin[:, 2],
-                            color=c, lw=0.7, alpha=0.75)
-                ax_sin.scatter(*z0_np, color=c, s=25, zorder=5)
-                n_converged += 1
-            else:
-                ax_sin.scatter(*z0_np, color=c, s=60, marker='x', zorder=5)
-        except Exception:
-            ax_sin.scatter(*z0_np, color=c, s=60, marker='x', zorder=5)
-
-    ax_enc.set_title(f'Encoder trajectories ({n_show} ICs)', fontsize=11)
-    ax_enc.set_xlabel('ξ₀'); ax_enc.set_ylabel('ξ₁'); ax_enc.set_zlabel('ξ₂')
-
-    ax_sin.set_title(f'SINDy ODE trajectories\n({n_converged}/{n_show} converged)',
-                     fontsize=11)
-    ax_sin.set_xlabel('ξ₀'); ax_sin.set_ylabel('ξ₁'); ax_sin.set_zlabel('ξ₂')
-
-    fig.suptitle('Multi-IC Attractor — Encoder vs Learned SINDy Dynamics',
-                 fontsize=13, fontweight='bold')
-    plt.tight_layout()
-    path = os.path.join(out_dir, 'fig5_multi_ic_attractor.png')
-    plt.savefig(path, dpi=150, bbox_inches='tight')
+    fig2d.suptitle("2D Latent Space: Encoder vs Learned SINDy ODE",
+                   fontsize=13, fontweight="bold")
+    fig2d.tight_layout()
+    path2d = os.path.join(out_dir, "fig4b_sindy_2d.png")
+    plt.savefig(path2d, dpi=150, bbox_inches="tight")
     plt.close()
-    print(f"  Saved: {path}  ({n_converged}/{n_show} SINDy ICs converged)")
+    print(f"  Saved: {path2d}")
+
+    # ── fig4c: animated 3D overlay ──
+    from matplotlib.animation import FuncAnimation, PillowWriter
+
+    n_frames  = min(200, len(t))
+    frame_idx = np.linspace(0, len(t) - 1, n_frames, dtype=int)
+
+    figc = plt.figure(figsize=(8, 7))
+    ax = figc.add_subplot(111, projection="3d")
+    ax.plot(z_enc[:, 0],   z_enc[:, 1],   z_enc[:, 2],
+            color="steelblue", lw=0.5, alpha=0.2)
+    ax.plot(z_sindy[:, 0], z_sindy[:, 1], z_sindy[:, 2],
+            color="tomato",    lw=0.5, alpha=0.2)
+    ax.scatter(*z_enc[0], color="lime", s=80, zorder=6, marker="o")
+
+    line_enc,   = ax.plot([], [], [], color="steelblue", lw=1.4, label="Encoder")
+    line_sindy, = ax.plot([], [], [], color="tomato",    lw=1.4, ls="--", label="SINDy ODE")
+    dot_enc,    = ax.plot([], [], [], "o", color="steelblue", ms=7, zorder=7)
+    dot_sindy,  = ax.plot([], [], [], "o", color="tomato",    ms=7, zorder=7)
+    time_text   = ax.text2D(0.02, 0.96, "", transform=ax.transAxes, fontsize=9, va="top")
+
+    ax.set_xlabel("xi0"); ax.set_ylabel("xi1"); ax.set_zlabel("xi2")
+    ax.set_title(f"3D Overlay: Encoder vs SINDy ODE — IC #{ic_idx}",
+                 fontsize=12, fontweight="bold")
+    ax.legend(fontsize=9)
+
+    def _init():
+        line_enc.set_data_3d([], [], [])
+        line_sindy.set_data_3d([], [], [])
+        dot_enc.set_data_3d([], [], [])
+        dot_sindy.set_data_3d([], [], [])
+        time_text.set_text("")
+        return line_enc, line_sindy, dot_enc, dot_sindy, time_text
+
+    def _update(frame):
+        k = frame_idx[frame]
+        line_enc.set_data_3d(z_enc[:k+1, 0],   z_enc[:k+1, 1],   z_enc[:k+1, 2])
+        line_sindy.set_data_3d(z_sindy[:k+1, 0], z_sindy[:k+1, 1], z_sindy[:k+1, 2])
+        dot_enc.set_data_3d([z_enc[k, 0]],   [z_enc[k, 1]],   [z_enc[k, 2]])
+        dot_sindy.set_data_3d([z_sindy[k, 0]], [z_sindy[k, 1]], [z_sindy[k, 2]])
+        time_text.set_text(f"t = {t[k]:.2f}")
+        if frame == n_frames - 1:
+            ax.scatter(*z_enc[-1],   color="steelblue", s=80, zorder=8, marker="s")
+            ax.scatter(*z_sindy[-1], color="tomato",    s=80, zorder=8, marker="s")
+        return line_enc, line_sindy, dot_enc, dot_sindy, time_text
+
+    anim = FuncAnimation(figc, _update, frames=n_frames,
+                         init_func=_init, blit=False, interval=50)
+    pathc = os.path.join(out_dir, "fig4c_sindy_overlay.gif")
+    anim.save(pathc, writer=PillowWriter(fps=20))
+    plt.close()
+    print(f"  Saved: {pathc}")
+
+
+# ─── figure 5: long-term phase portrait ──────────────────────────────────────
+
+def fig5_long_term_phase(ev, out_dir, ic_idx):
+    """Continuous latent 3D phase portrait — does SINDy preserve the attractor topology?"""
+    t       = ev["test_t"]
+    n_steps = len(t)
+    sl      = _ic_slice(ic_idx, n_steps)
+
+    z_enc = ev["test_z_enc"][sl]
+    sim_ok  = _ic_ok(ev, "test", ic_idx)
+    z_sin = ev["test_z_sindy"][sl] if "test_z_sindy" in ev else None
+    if z_sin is None or np.any(np.isnan(z_sin)):
+        sim_ok = False
+
+    if z_enc.shape[1] < 3:
+        print("  Skipping fig5: latent_dim < 3 for 3D phase portrait.")
+        return
+
+    fig = plt.figure(figsize=(8, 8))
+    ax  = fig.add_subplot(111, projection="3d")
+    ax.plot(z_enc[:, 0], z_enc[:, 1], z_enc[:, 2],
+            color="lightgray", lw=1.0, alpha=0.6, label="Encoder Reference")
+
+    if sim_ok:
+        ax.plot(z_sin[:, 0], z_sin[:, 1], z_sin[:, 2],
+                color="tomato", lw=0.6, alpha=0.9, label="SINDy ODE")
+        ax.scatter(z_sin[0, 0], z_sin[0, 1], z_sin[0, 2],
+                   color="lime", s=50, zorder=5, label="Start")
+        status = "Converged"
+    else:
+        ax.scatter(z_enc[0, 0], z_enc[0, 1], z_enc[0, 2],
+                   color="red", s=100, marker="X", zorder=5, label="SINDy Diverged")
+        status = "Diverged"
+
+    ax.set_xlabel("xi0"); ax.set_ylabel("xi1"); ax.set_zlabel("xi2")
+    ax.legend(loc="upper right")
+    ax.set_title(f"Long-term Latent Phase Portrait — IC #{ic_idx} [{status}]\n"
+                 f"Does SINDy preserve the Attractor Topology?",
+                 fontsize=12, fontweight="bold")
+    plt.tight_layout()
+    path = os.path.join(out_dir, "fig5_long_term_phase.png")
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"  Saved: {path}")
+
+
+# ─── figure 6: observable dimension comparison ───────────────────────────────
+
+def fig6_x_comparison(ev, out_dir, ic_idx):
+    """Compare true x(t) vs encoder->decoder x(t) vs SINDy->decoder x(t) on dim 0."""
+    t       = ev["test_t"]
+    n_steps = len(t)
+    sl      = _ic_slice(ic_idx, n_steps)
+
+    x_np    = ev["test_x"][sl]
+    x_enc   = ev["test_x_dec"][sl]
+    sim_ok  = _ic_ok(ev, "test", ic_idx)
+    x_sindy = ev["test_x_sindy"][sl] if "test_x_sindy" in ev else None
+    if x_sindy is None or np.any(np.isnan(x_sindy)):
+        sim_ok = False
+
+    if not sim_ok:
+        print("  Skipping fig6: SINDy integration diverged.")
+        return
+
+    x0_true  = x_np[:, 0]
+    x0_enc   = x_enc[:, 0]
+    x0_sindy = x_sindy[:, 0]
+
+    err_enc   = (x0_enc   - x0_true) ** 2
+    err_sindy = (x0_sindy - x0_true) ** 2
+
+    fig, (ax_ts, ax_err) = plt.subplots(
+        2, 1, figsize=(12, 8), sharex=True,
+        gridspec_kw={"height_ratios": [1.4, 1], "hspace": 0.35},
+    )
+
+    ax_ts.plot(t, x0_true,  color="#333333",   lw=1.5, label="True x(t)")
+    ax_ts.plot(t, x0_enc,   color="steelblue", lw=1.2, ls="--", label="Encoder->Decoder")
+    ax_ts.plot(t, x0_sindy, color="tomato",    lw=1.2, ls=":",  label="SINDy->Decoder")
+    ax_ts.set_ylabel("x(t)  [observable dim]", fontsize=11)
+    ax_ts.set_title("Observable Dimension: True x(t) vs Reconstructions", fontsize=12)
+    ax_ts.legend(fontsize=10); ax_ts.grid(True, alpha=0.3)
+
+    ax_err.semilogy(t, err_enc,   color="steelblue", lw=1.4, label="Encoder err²")
+    ax_err.semilogy(t, err_sindy, color="tomato",    lw=1.4, ls="--", label="SINDy err²")
+    ax_err.set_xlabel("t", fontsize=11)
+    ax_err.set_ylabel("Squared error  x(t)", fontsize=11)
+    ax_err.set_title("Pointwise squared error on observable dimension", fontsize=12)
+    ax_err.legend(fontsize=10); ax_err.grid(True, which="both", alpha=0.3)
+
+    rmse_enc   = float(np.sqrt(np.mean(err_enc)))
+    rmse_sindy = float(np.sqrt(np.mean(err_sindy)))
+    fig.suptitle(
+        f"Observable Dimension Comparison — IC #{ic_idx}\n"
+        f"RMSE  Encoder: {rmse_enc:.4f}   SINDy: {rmse_sindy:.4f}",
+        fontsize=13, fontweight="bold",
+    )
+    path = os.path.join(out_dir, "fig6_x_comparison.png")
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {path}")
 
 
 # ─── main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--mat', required=True,
-                        help='Path to checkpoint .mat (or .json) file, '
-                             'e.g. model_20260501_150000.mat')
-    parser.add_argument('--data', required=True,
-                        help='Path to .npz data file; uses test_x/dx/t (falls back to val split)')
-    parser.add_argument('--ic', type=int, default=0,
-                        help='Which test IC to use for time-series / reconstruction plots (default: 0)')
-    parser.add_argument('--out_dir', default=None,
-                        help='Output directory for figures (default: same directory as .mat file)')
-    parser.add_argument('--n_ics_plot', type=int, default=10,
-                        help='Number of ICs to show in fig5 multi-IC attractor (default: 10)')
+    parser = argparse.ArgumentParser(
+        description="Visualize Lorenz SINDy-AE results from precomputed eval data."
+    )
+    parser.add_argument("--eval", required=True,
+                        help="Path to eval_<stamp>.npz produced by analyze.py")
+    parser.add_argument("--ic", type=int, default=0,
+                        help="Which test IC to use for time-series / reconstruction plots (default: 0)")
+    parser.add_argument("--out_dir", default=None,
+                        help="Output directory for figures (default: same dir as --eval)")
     args = parser.parse_args()
 
-    device = torch.device('cpu')  # visualization is CPU; keeps output deterministic
+    print(f"Loading eval data from {args.eval} ...")
+    ev = _load_eval(args.eval)
+    print(f"  latent_dim={ev['latent_dim']}, library_dim={ev['library_dim']}, "
+          f"model_stamp={ev['model_stamp']}")
 
-    # Strip extension to get prefix; infer format from extension
-    if args.mat.endswith('.json'):
-        mat_prefix = args.mat[:-5]
-        fmt = 'json'
-    else:
-        mat_prefix = args.mat[:-4] if args.mat.endswith('.mat') else args.mat
-        fmt = 'mat'
+    n_steps = len(ev["test_t"])
+    n_ics   = ev["test_x"].shape[0] // n_steps
+    print(f"  {n_ics} ICs x {n_steps} steps = {ev['test_x'].shape[0]} samples")
 
-    print(f"Loading model from {mat_prefix} ({fmt})...")
-    if fmt == 'mat':
-        model, params = load_model_mat(mat_prefix, device=device)
-    else:
-        model, params = load_model_json(mat_prefix, device=device)
-    model.eval()
-    print(f"  latent_dim={params['latent_dim']}, library_dim={params['library_dim']}")
-
-    out_dir = args.out_dir or os.path.dirname(os.path.abspath(mat_prefix))
+    out_dir = args.out_dir or os.path.dirname(os.path.abspath(args.eval))
     os.makedirs(out_dir, exist_ok=True)
-
-    print(f"Loading data from {args.data} ...")
-    npz = np.load(args.data, allow_pickle=False)
-    split = 'test' if 'test_x' in npz.files else 'val'
-    print(f"  Using '{split}' split.")
-    t_key = f'{split}_t' if f'{split}_t' in npz.files else 'train_t'
-    test_data = {
-        'x':  npz[f'{split}_x'],
-        'dx': npz[f'{split}_dx'],
-        't':  npz[t_key],
-    }
-    ddx_key = f'{split}_ddx'
-    if ddx_key in npz.files:
-        test_data['ddx'] = npz[ddx_key]
-    z_key = f'{split}_z'
-    if z_key in npz.files:
-        test_data['z'] = npz[z_key]  # [N*T, 3] normalized true Lorenz state
-    n_steps = len(test_data['t'])
-    n_ics   = test_data['x'].shape[0] // n_steps
-    print(f"  {n_ics} ICs × {n_steps} steps = {test_data['x'].shape[0]} samples")
-
     ic = args.ic
-    print(f"\nGenerating figures (IC #{ic} for time-series plots)...")
-    print(f"Figures will be saved to: {out_dir}/")
+    print(f"\nGenerating figures (IC #{ic} for time-series plots) into: {out_dir}/")
 
-    fig1_3d_attractor(model, test_data, device, out_dir)
-    fig2_time_series(model, test_data, device, out_dir, ic)
-    fig3_reconstruction(model, test_data, device, out_dir, ic)
-    fig4_sindy_simulation(model, params, test_data, device, out_dir, ic)
-    fig5_multi_ic_attractor(model, params, test_data, device, out_dir, n_ics_plot=args.n_ics_plot)
+    def _safe(fn, *args, **kwargs):
+        try:
+            fn(*args, **kwargs)
+        except Exception as e:
+            print(f"  ERROR in {fn.__name__}: {type(e).__name__}: {e}")
+
+    _safe(fig0_1_train_reconstruction,   ev, out_dir, ic)
+    _safe(fig0_2_train_sindy_simulation, ev, out_dir, ic)
+    _safe(fig0_3_train_x_comparison,     ev, out_dir, ic)
+    _safe(fig1_3d_attractor,       ev, out_dir)
+    _safe(fig2_reconstruction,     ev, out_dir, ic)
+    _safe(fig3_time_series,        ev, out_dir, ic)
+    _safe(fig4_sindy_simulation,   ev, out_dir, ic)
+    _safe(fig5_long_term_phase,    ev, out_dir, ic)
+    _safe(fig6_x_comparison,       ev, out_dir, ic)
 
     print(f"\nDone. All figures saved to {out_dir}/")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
