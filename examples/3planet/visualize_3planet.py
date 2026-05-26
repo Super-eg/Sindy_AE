@@ -186,14 +186,19 @@ def fig0_3_train_x_comparison(ev, out_dir):
 
 def fig1_phase_portrait(ev, out_dir):
     """True (x1, v_x1) phase portrait vs learned latent space."""
-    z_true = ev["test_z"]      # Contains [x_1, v_x1] ground truth
+    has_z  = "test_z" in ev
+    z_true = ev["test_z"] if has_z else ev["test_x"][:, :2]   # fallback to delay coords
     z_lat  = ev["test_z_enc"]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
     ax1.plot(z_true[:, 0], z_true[:, 1], color="steelblue", lw=0.5, alpha=0.8)
-    ax1.set_title("True 3-Body BHH Orbit\n(Planet 1: $x_1$ vs $v_{x1}$)", fontsize=12)
-    ax1.set_xlabel("Position $x_1$"); ax1.set_ylabel("Velocity $v_{x1}$")
+    if has_z:
+        ax1.set_title("True 3-Body BHH Orbit\n(Planet 1: $x_1$ vs $v_{x1}$)", fontsize=12)
+        ax1.set_xlabel("Position $x_1$"); ax1.set_ylabel("Velocity $v_{x1}$")
+    else:
+        ax1.set_title("Observed delay coordinates\n($x_1(t)$ vs $x_1(t-\\tau)$)", fontsize=12)
+        ax1.set_xlabel("$x_1(t)$"); ax1.set_ylabel("$x_1(t-\\tau)$")
     ax1.grid(True, alpha=0.3)
 
     ax2.plot(z_lat[:, 0], z_lat[:, 1], color="tomato", lw=0.5, alpha=0.8)
@@ -266,12 +271,15 @@ def fig2_reconstruction(ev, out_dir):
 def fig3_time_series(ev, out_dir):
     """True (x1, v_x1) vs latent (xi_0, xi_1) over time."""
     t      = ev["test_t"]
-    z_true = ev["test_z"]
+    has_z  = "test_z" in ev
+    z_true = ev["test_z"] if has_z else ev["test_x"][:, :2]   # fallback to delay coords
+
     z_lat  = ev["test_z_enc"]
 
     colors_true = ["steelblue", "darkorange"]
     colors_lat  = ["tomato",    "orchid"]
-    ylabels_true = ["$x_1(t)$", "$v_{x1}(t)$"]
+    ylabels_true = (["$x_1(t)$", "$v_{x1}(t)$"] if has_z
+                    else ["$x_1(t)$", "$x_1(t-\\tau)$"])
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 6), sharex=True)
     for i in range(2):
@@ -283,7 +291,8 @@ def fig3_time_series(ev, out_dir):
         axes[i, 1].set_ylabel(f"$\\xi_{i}(t)$ (Learned)", fontsize=11)
         axes[i, 1].grid(True, alpha=0.3)
 
-    axes[0, 0].set_title("True 3-Body State (Planet 1)", fontsize=11)
+    axes[0, 0].set_title("True 3-Body State (Planet 1)" if has_z
+                         else "Observed delay coordinates", fontsize=11)
     axes[0, 1].set_title("Learned Latent Variables", fontsize=11)
     axes[-1, 0].set_xlabel("Time (s)"); axes[-1, 1].set_xlabel("Time (s)")
 

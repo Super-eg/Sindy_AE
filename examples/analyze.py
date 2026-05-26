@@ -17,6 +17,9 @@ Run from examples/:
     python3 analyze.py --mat lorenz/checkpoints/<dir>/model_<stamp>.mat \
                         --data lorenz/delay_xcoordinate_d20_5.npz
 
+(The .npz filename suffix `d<delay_dim>_<delay_steps>` reflects the args used at
+generate time; replace with whatever you actually produced.)
+
 Visualization scripts then consume eval_<stamp>.npz directly.
 """
 import argparse
@@ -319,7 +322,9 @@ def main():
 
     # Pass scalar metadata through from data file
     for k in ("dt", "t_end", "t_start", "delay_dim", "delay_steps", "tau",
-              "noise_strength", "n_train_ics", "n_val_ics", "n_test_ics"):
+              "noise_strength", "n_train_ics", "n_val_ics", "n_test_ics",
+              "t_train_offset", "t_val_offset", "t_test_offset",
+              "mu", "normalization", "data_mean"):
         if k in npz.files:
             v = npz[k]
             eval_dict[k] = v.item() if np.ndim(v) == 0 else v

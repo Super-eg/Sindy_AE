@@ -160,11 +160,21 @@ def main():
     save_dict["delay_steps"]    = np.int64(args.delay_steps)
     save_dict["tau"]            = np.float64(args.delay_steps * args.dt)
     save_dict["noise_strength"] = np.float64(args.noise_strength)
-    
+
     # 由於是沿著單一軌道做時間切割，這裡將 n_ics 標記為 1
     save_dict["n_train_ics"]    = np.int64(1)
     save_dict["n_val_ics"]      = np.int64(1)
     save_dict["n_test_ics"]     = np.int64(1)
+
+    # Per-split relative time arrays (starting at 0 within each split) and
+    # absolute offsets so downstream scripts can recover global time:
+    #   global_t_split = t_<split>_offset + <split>_t
+    save_dict["train_t"] = np.arange(train["x"].shape[0], dtype=np.float64) * args.dt
+    save_dict["val_t"]   = np.arange(val["x"].shape[0],   dtype=np.float64) * args.dt
+    save_dict["test_t"]  = np.arange(test["x"].shape[0],  dtype=np.float64) * args.dt
+    save_dict["t_train_offset"] = np.float64(0.0)
+    save_dict["t_val_offset"]   = np.float64(args.train_periods * T_PERIOD)
+    save_dict["t_test_offset"]  = np.float64((args.train_periods + args.val_periods) * T_PERIOD)
 
     os.makedirs(os.path.dirname(os.path.abspath(args.out)) or '.', exist_ok=True)
     np.savez(args.out, **save_dict)

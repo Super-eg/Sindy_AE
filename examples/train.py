@@ -2,12 +2,13 @@
 
 Run from examples/:
     python3 train.py --data lorenz/delay_xcoordinate_d20_5.npz
-    python3 train.py --data pendulum/pendulum_data.npz --latent_dim 1 --include_sine
+
+(The .npz filename suffix `d<delay_dim>_<delay_steps>` reflects the args used at
+generate time; replace with whatever you actually produced.)
 
 All outputs (.mat model, log, loss plot) are written to the same directory as --data.
 
-Model order is auto-detected: if the .npz contains train_ddx → order 2 (pendulum);
-otherwise order 1 (Lorenz / delay embedding).
+Model order is auto-detected: order 2 if the .npz contains train_ddx, otherwise order 1.
 """
 import argparse
 import datetime
@@ -59,7 +60,8 @@ def _load_meta(npz):
     meta = {}
     for k in ("t_end", "dt", "noise_strength", "n_train_ics", "n_val_ics", "n_test_ics",
               "delay_dim", "delay_steps", "tau", "t_start",
-              "t_train_offset", "t_val_offset", "t_test_offset"):
+              "t_train_offset", "t_val_offset", "t_test_offset",
+              "mu", "normalization", "data_mean"):
         if k in npz.files:
             meta[k] = npz[k].item()
     return meta
@@ -153,7 +155,7 @@ def main():
     parser.add_argument("--loss_weight_coord",     type=float, default=0.0,
                         help="Weight for coord loss z[:,0] ≈ x[:,0]; useful for delay embedding "
                              "(default: 0.0 = disabled)")
-    parser.add_argument("--loss_weight_cons",      type=float, default=0.0,
+    parser.add_argument("--loss_weight_sindy_cons", type=float, default=0.0,
                         help="Weight for SINDy consistency loss (Bakarji et al. 2023, eq 1.11): "
                              "integrate latent dynamics and verify z[:,0] reproduces delay entries. "
                              "Only active when .npz contains tau (delay embedding data). "

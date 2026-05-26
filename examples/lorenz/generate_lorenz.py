@@ -9,7 +9,7 @@ With embedding dimension d ≥ 2·dim(attractor)+1 ≈ 7, the delay vector is
 diffeomorphic to the original 3-D Lorenz attractor (Takens' theorem).
 
 Run from examples/lorenz/:
-    python3 generate_delay.py
+    python3 generate_lorenz.py
 
 Output .npz is passed to examples/train.py via --data <path>.
 """

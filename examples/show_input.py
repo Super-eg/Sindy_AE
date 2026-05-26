@@ -3,7 +3,10 @@
 Run from examples/:
     python3 show_input.py --data lorenz/delay_xcoordinate_d20_5.npz
     python3 show_input.py --data lorenz/delay_xcoordinate_d20_5.npz --ic 3
-    python3 show_input.py --data pendulum/pendulum_data.npz --n_ics 20
+    python3 show_input.py --data vander/delay_xcoordinate_d10_3.npz --n_ics 20
+
+(The .npz filename suffix `d<delay_dim>_<delay_steps>` reflects the args used at
+generate time; replace with whatever you actually produced.)
 
 Outputs PNGs to the same folder as the .npz file:
     Single IC : pca2d_<stem>_ic<N>.png / pca3d_<stem>_ic<N>.png
